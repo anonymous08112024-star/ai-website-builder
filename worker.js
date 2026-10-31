@@ -10,11 +10,11 @@ const MEM_STATS = {
   sites_created: 0,
   edits: 0
 };
+const PROCESSED_UPDATES = new Set();
 let ADMIN_BROADCAST_MODE = false;
-let CACHED_MODELS = null;
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const botToken = (env && env.BOT_TOKEN ? env.BOT_TOKEN : DEFAULT_BOT_TOKEN).trim();
     const geminiKey = (env && env.GEMINI_KEY ? env.GEMINI_KEY : DEFAULT_GEMINI_KEY).trim();
     const db = env && env.BOT_DB ? env.BOT_DB : null;
@@ -112,11 +112,29 @@ export default {
       );
     }
 
-    // 4. Telegram Webhook Handler
+    // 4. Telegram Webhook Handler (Immediate 200 OK + Background Execution)
     if (request.method === "POST" && url.pathname === "/webhook") {
       try {
         const update = await request.json();
-        await handleUpdate(update, botToken, geminiKey, db, url.origin);
+
+        // Deduplication to prevent double-clicks & retries
+        if (update && update.update_id) {
+          if (PROCESSED_UPDATES.has(update.update_id)) {
+            return new Response("OK", { status: 200 });
+          }
+          PROCESSED_UPDATES.add(update.update_id);
+          if (PROCESSED_UPDATES.size > 500) {
+            const first = PROCESSED_UPDATES.values().next().value;
+            PROCESSED_UPDATES.delete(first);
+          }
+        }
+
+        // Return 200 OK to Telegram immediately so it NEVER retries or duplicates
+        if (ctx && ctx.waitUntil) {
+          ctx.waitUntil(handleUpdate(update, botToken, geminiKey, db, url.origin));
+        } else {
+          handleUpdate(update, botToken, geminiKey, db, url.origin).catch(console.error);
+        }
       } catch (err) {
         console.error("Webhook error:", err);
       }
@@ -363,109 +381,129 @@ async function sendWelcomeMenu(botToken, chatId, userId) {
 
   await tgApi(botToken, "sendMessage", {
     chat_id: chatId,
-    text: `🚀 *Instant AI Website Creator & Visual Editor*\n\nDescribe the website you want in casual English or Hindi:\n\n• *Business:* Gym, Cafe, Restaurant, Dental Clinic\n• *Portfolio:* Photography, Freelancer, Coding, Resume\n• *Store / Agency:* Clothing Brand, Real Estate, Consulting\n\n✨ *New Features:*\n1. 🌐 *Instant Edge Hosting:* Live link generated in ~8 seconds.\n2. ✏️ *Visual Tap-to-Edit:* Tap any headline, price, or text on your phone to customize it, then save live in 1 tap!\n3. 🤖 *AI Revisions:* Reply to any site with changes or type \`/edit make it dark mode\`.\n\n_Example: "Create a modern dark-mode website for a sneaker store named KicksHub in Jaipur with product cards and WhatsApp order button."_\n\n👇 *Send your prompt now or try a demo template below:*`,
+    text: `🚀 *Instant AI Website Creator & Visual Editor*\n\nDescribe the website you want in casual English or Hindi:\n\n• *Business:* Gym, Cafe, Restaurant, Dental Clinic\n• *Portfolio:* Photography, Freelancer, Coding, Resume\n• *Store / Agency:* Clothing Brand, Real Estate, Consulting\n\n✨ *Key Features:*\n1. 🌐 *Instant Edge Hosting:* Live link deployed on Cloudflare.\n2. ✏️ *Visual Tap-to-Edit:* Tap any headline, price, or text on your phone to customize it, then save live in 1 tap!\n3. 🤖 *AI Revisions:* Reply to any site with changes or type \`/edit make it dark mode\`.\n\n_Example: "Create a modern dark-mode website for a sneaker store named KicksHub in Jaipur with product cards and WhatsApp order button."_\n\n👇 *Send your prompt now or try a demo template below:*`,
     parse_mode: "Markdown",
     reply_markup: { inline_keyboard: keyboard }
   });
 }
 
-// Main AI Generation & Deployment Pipeline with Dynamic Visual Progress
+// Main AI Generation & Deployment Pipeline with Realistic Progress Steps
 async function generateAndDeployWebsite(botToken, geminiKey, db, chatId, userId, userPrompt, originUrl) {
   // 1. Initial Animated Progress Tracker Message
   const statusMsg = await tgApi(botToken, "sendMessage", {
     chat_id: chatId,
-    text: `⚡ *Analyzing your prompt...*\n\`[▓░░░░░░░░░] 10%\` Designing layout & color palette...`,
+    text: `⚡ *Analyzing your prompt...*\n\`[▓░░░░░░░░░] 15%\` Designing layout & color palette...`,
     parse_mode: "Markdown"
   });
 
   const msgId = statusMsg.result?.message_id;
 
-  // 2. Start Gemini Generation alongside Dynamic Visual Progress Steps
-  const aiPromise = generateWebsiteCodeWithGemini(geminiKey, userPrompt);
-  const rawHtml = await trackProgress(botToken, chatId, msgId, aiPromise);
-
-  // 3. Delete progress message cleanly
-  if (msgId) {
-    await tgApi(botToken, "deleteMessage", {
-      chat_id: chatId,
-      message_id: msgId
-    });
-  }
-
-  if (!rawHtml || rawHtml.length < 200) {
-    await tgApi(botToken, "sendMessage", {
-      chat_id: chatId,
-      text: "😕 *Could not generate website code.* Please try again with a slightly more detailed prompt!",
-      parse_mode: "Markdown"
-    });
-    return;
-  }
-
-  // 4. Generate URL slug & embed watermark
-  const cleanSlug = generateSlugFromPrompt(userPrompt);
-  const finalHtml = injectBrandingFooter(rawHtml);
-
-  // 5. Store permanently in KV database & RAM cache
-  SITE_CACHE.set(cleanSlug, finalHtml);
-  if (db) {
-    try {
-      await db.put(`site_${cleanSlug}`, finalHtml);
-      await db.put(`u_last_site_${userId}`, cleanSlug);
-      await incrementStat(db, "sites_created");
-    } catch (e) {}
-  }
-
-  const liveUrl = `${originUrl}/site/${cleanSlug}`;
-  const editUrl = `${originUrl}/site/${cleanSlug}?edit=true`;
-  const shareText = encodeURIComponent(`Check out my new website built in 8 seconds with ${CHANNEL_USERNAME} 🚀: ${liveUrl}`);
-  const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(liveUrl)}&text=${shareText}`;
-  const channelHandle = CHANNEL_USERNAME.replace("@", "");
-
-  const actionButtons = {
-    inline_keyboard: [
-      [
-        { text: "🌐 Open Live Website", url: liveUrl },
-        { text: "✏️ Tap-to-Edit on Phone", url: editUrl }
-      ],
-      [
-        { text: "📲 Share Website", url: shareUrl },
-        { text: `📢 Join ${CHANNEL_USERNAME}`, url: `https://t.me/${channelHandle}` }
-      ]
-    ]
-  };
-
-  let caption = `🎉 *Your Website is Live & Ready to Customize!*\n\n`;
-  caption += `🔗 *Live Link:* \`${liveUrl}\`\n`;
-  caption += `✏️ *Visual Editor:* [Open Tap-to-Edit Mode](${editUrl})\n\n`;
-  caption += `✨ *Highlights & Features:*\n`;
-  caption += `• *100% Mobile Responsive* with Tailwind CSS\n`;
-  caption += `• *Dynamic Visuals:* Floating gradients, hover lift & glowing glass cards\n`;
-  caption += `• *Interactive WhatsApp CTA:* Floating animated booking button\n`;
-  caption += `• *Visual In-Browser Editor:* Tap any text or price on screen & save live!\n`;
-  caption += `• *AI Revisions:* Reply to this message with \`/edit <changes>\` anytime.\n\n`;
-  caption += `_Tap "Open Live Website" to view or "Tap-to-Edit on Phone" to customize text!_`;
-
-  // Send delivery announcement
-  await tgApi(botToken, "sendMessage", {
-    chat_id: chatId,
-    text: caption,
-    parse_mode: "Markdown",
-    reply_markup: actionButtons
-  });
-
-  // Send standalone index.html source code file
   try {
-    const form = new FormData();
-    form.append("chat_id", String(chatId));
-    form.append("caption", `📄 *index.html* standalone source code for \`${cleanSlug}\`.\nOpen directly in any browser or host on GitHub Pages!`);
-    form.append("parse_mode", "Markdown");
-    form.append("document", new Blob([finalHtml], { type: "text/html" }), `${cleanSlug}.html`);
+    // 2. Start Gemini Generation alongside Dynamic Visual Progress Steps
+    const aiPromise = generateWebsiteCodeWithGemini(geminiKey, userPrompt);
+    const rawHtml = await trackProgress(botToken, chatId, msgId, aiPromise);
 
-    await fetch(`https://api.telegram.org/bot${botToken}/sendDocument`, {
-      method: "POST",
-      body: form
-    });
-  } catch (e) {}
+    if (!rawHtml || rawHtml.length < 200) {
+      throw new Error("AI returned empty or invalid HTML. Please try again!");
+    }
+
+    // 3. Mark 100% when HTML is received and being saved
+    if (msgId) {
+      await tgApi(botToken, "editMessageText", {
+        chat_id: chatId,
+        message_id: msgId,
+        text: `🚀 *Deploying to Edge CDN...*\n\`[▓▓▓▓▓▓▓▓▓▓] 100%\` Finalizing Cloudflare hosting...`,
+        parse_mode: "Markdown"
+      });
+    }
+
+    // 4. Generate URL slug & embed watermark
+    const cleanSlug = generateSlugFromPrompt(userPrompt);
+    const finalHtml = injectBrandingFooter(rawHtml);
+
+    // 5. Store permanently in KV database & RAM cache
+    SITE_CACHE.set(cleanSlug, finalHtml);
+    if (db) {
+      try {
+        await db.put(`site_${cleanSlug}`, finalHtml);
+        await db.put(`u_last_site_${userId}`, cleanSlug);
+        await incrementStat(db, "sites_created");
+      } catch (e) {}
+    }
+
+    const liveUrl = `${originUrl}/site/${cleanSlug}`;
+    const editUrl = `${originUrl}/site/${cleanSlug}?edit=true`;
+    const shareText = encodeURIComponent(`Check out my new website built in 8 seconds with ${CHANNEL_USERNAME} 🚀: ${liveUrl}`);
+    const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(liveUrl)}&text=${shareText}`;
+    const channelHandle = CHANNEL_USERNAME.replace("@", "");
+
+    const actionButtons = {
+      inline_keyboard: [
+        [
+          { text: "🌐 Open Live Website", url: liveUrl },
+          { text: "✏️ Tap-to-Edit on Phone", url: editUrl }
+        ],
+        [
+          { text: "📲 Share Website", url: shareUrl },
+          { text: `📢 Join ${CHANNEL_USERNAME}`, url: `https://t.me/${channelHandle}` }
+        ]
+      ]
+    };
+
+    let caption = `🎉 *Your Website is Live & Ready to Customize!*\n\n`;
+    caption += `🔗 *Live Link:* \`${liveUrl}\`\n`;
+    caption += `✏️ *Visual Editor:* [Open Tap-to-Edit Mode](${editUrl})\n\n`;
+    caption += `✨ *Highlights & Features:*\n`;
+    caption += `• *100% Mobile Responsive* with Tailwind CSS\n`;
+    caption += `• *Dynamic Visuals:* Floating gradients, hover lift & glass cards\n`;
+    caption += `• *Interactive WhatsApp CTA:* Floating animated booking button\n`;
+    caption += `• *Visual In-Browser Editor:* Tap any text or price on screen & save live!\n`;
+    caption += `• *AI Revisions:* Reply to this message with \`/edit <changes>\` anytime.\n\n`;
+    caption += `_Tap "Open Live Website" to view or "Tap-to-Edit on Phone" to customize text!_`;
+
+    // 6. Smoothly transform the progress message directly into the finished delivery card
+    if (msgId) {
+      await tgApi(botToken, "editMessageText", {
+        chat_id: chatId,
+        message_id: msgId,
+        text: caption,
+        parse_mode: "Markdown",
+        reply_markup: actionButtons
+      });
+    } else {
+      await tgApi(botToken, "sendMessage", {
+        chat_id: chatId,
+        text: caption,
+        parse_mode: "Markdown",
+        reply_markup: actionButtons
+      });
+    }
+
+    // 7. Send standalone index.html source code file
+    try {
+      const form = new FormData();
+      form.append("chat_id", String(chatId));
+      form.append("caption", `📄 *index.html* source code for \`${cleanSlug}\`.\nOpen directly in any browser or host on GitHub Pages!`);
+      form.append("parse_mode", "Markdown");
+      form.append("document", new Blob([finalHtml], { type: "text/html" }), `${cleanSlug}.html`);
+
+      await fetch(`https://api.telegram.org/bot${botToken}/sendDocument`, {
+        method: "POST",
+        body: form
+      });
+    } catch (e) {}
+
+  } catch (err) {
+    console.error("Generation error:", err);
+    if (msgId) {
+      await tgApi(botToken, "editMessageText", {
+        chat_id: chatId,
+        message_id: msgId,
+        text: `⚠️ *Website generation encountered an error:*\n\`${err.message || "Request timed out"}\`\n\nPlease tap a demo button or send your prompt again!`,
+        parse_mode: "Markdown"
+      });
+    }
+  }
 }
 
 // AI Modification Engine for Existing Websites
@@ -492,65 +530,69 @@ async function modifyWebsiteWithAI(botToken, geminiKey, db, chatId, userId, slug
 
   const msgId = statusMsg.result?.message_id;
 
-  const aiPromise = refineWebsiteWithGemini(geminiKey, existingHtml, editPrompt);
-  const updatedHtml = await trackProgress(botToken, chatId, msgId, aiPromise);
+  try {
+    const aiPromise = refineWebsiteWithGemini(geminiKey, existingHtml, editPrompt);
+    const updatedHtml = await trackProgress(botToken, chatId, msgId, aiPromise);
 
-  if (msgId) {
-    await tgApi(botToken, "deleteMessage", {
-      chat_id: chatId,
-      message_id: msgId
-    });
-  }
-
-  if (!updatedHtml || updatedHtml.length < 200) {
-    await tgApi(botToken, "sendMessage", {
-      chat_id: chatId,
-      text: "😕 *Could not apply changes.* Please describe your edit in more detail!",
-      parse_mode: "Markdown"
-    });
-    return;
-  }
-
-  const cleanUpdatedHtml = injectBrandingFooter(updatedHtml);
-
-  SITE_CACHE.set(slug, cleanUpdatedHtml);
-  if (db) {
-    try {
-      await db.put(`site_${slug}`, cleanUpdatedHtml);
-      await incrementStat(db, "edits");
-    } catch (e) {}
-  }
-
-  const liveUrl = `${originUrl}/site/${slug}`;
-  const editUrl = `${originUrl}/site/${slug}?edit=true`;
-
-  await tgApi(botToken, "sendMessage", {
-    chat_id: chatId,
-    text: `✅ *Your website has been updated!*\n\n🔗 *Updated Live Link:* \`${liveUrl}\`\n✏️ *Visual Editor:* [Open Tap-to-Edit](${editUrl})\n\n_Your changes are live immediately for all visitors!_`,
-    parse_mode: "Markdown",
-    reply_markup: {
-      inline_keyboard: [
-        [
-          { text: "🌐 Open Updated Website", url: liveUrl },
-          { text: "✏️ Tap-to-Edit on Phone", url: editUrl }
-        ]
-      ]
+    if (!updatedHtml || updatedHtml.length < 200) {
+      throw new Error("Could not apply edits.");
     }
-  });
+
+    const cleanUpdatedHtml = injectBrandingFooter(updatedHtml);
+
+    SITE_CACHE.set(slug, cleanUpdatedHtml);
+    if (db) {
+      try {
+        await db.put(`site_${slug}`, cleanUpdatedHtml);
+        await incrementStat(db, "edits");
+      } catch (e) {}
+    }
+
+    const liveUrl = `${originUrl}/site/${slug}`;
+    const editUrl = `${originUrl}/site/${slug}?edit=true`;
+
+    const caption = `✅ *Your website has been updated!*\n\n🔗 *Updated Live Link:* \`${liveUrl}\`\n✏️ *Visual Editor:* [Open Tap-to-Edit](${editUrl})\n\n_Your changes are live immediately for all visitors!_`;
+
+    if (msgId) {
+      await tgApi(botToken, "editMessageText", {
+        chat_id: chatId,
+        message_id: msgId,
+        text: caption,
+        parse_mode: "Markdown",
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: "🌐 Open Updated Website", url: liveUrl },
+              { text: "✏️ Tap-to-Edit on Phone", url: editUrl }
+            ]
+          ]
+        }
+      });
+    }
+  } catch (err) {
+    if (msgId) {
+      await tgApi(botToken, "editMessageText", {
+        chat_id: chatId,
+        message_id: msgId,
+        text: `⚠️ *Edit failed:* ${err.message}`,
+        parse_mode: "Markdown"
+      });
+    }
+  }
 }
 
-// Dynamic Progress Steps Runner (Updates Telegram status every ~2s)
+// Realistic Dynamic Progress Runner (Never reaches 100% until AI actually completes)
 async function trackProgress(botToken, chatId, msgId, promise) {
   if (!msgId) return await promise;
 
   const steps = [
-    { text: `🎨 *Building responsive layout...*\n\`[▓▓▓▓░░░░░░] 45%\` Styling Tailwind components & glass cards...`, ms: 2000 },
-    { text: `📱 *Injecting dynamic visuals...*\n\`[▓▓▓▓▓▓▓░░░] 75%\` Adding hover transitions, pulsing CTA & icons...`, ms: 2200 },
-    { text: `🚀 *Deploying to Edge CDN...*\n\`[▓▓▓▓▓▓▓▓▓▓] 100%\` Finalizing Cloudflare hosting...`, ms: 1600 }
+    { text: `🎨 *Building responsive layout...*\n\`[▓▓▓▓░░░░░░] 45%\` Styling Tailwind components & glass cards...`, ms: 2200 },
+    { text: `📱 *Injecting dynamic visuals...*\n\`[▓▓▓▓▓▓▓░░░] 75%\` Adding hover transitions, pulsing CTA & icons...`, ms: 2800 },
+    { text: `⚡ *Finalizing code architecture...*\n\`[▓▓▓▓▓▓▓▓▓░] 90%\` Optimizing mobile responsiveness...`, ms: 3200 }
   ];
 
   let completed = false;
-  const runner = promise.then(res => { completed = true; return res; });
+  const runner = promise.then(res => { completed = true; return res; }).catch(err => { completed = true; throw err; });
 
   (async () => {
     for (const step of steps) {
@@ -595,7 +637,10 @@ Technical & Visual Requirements:
    - Polished Footer.
 6. Make it completely self-contained. Return ONLY valid raw HTML code without markdown code fences, no backticks, no conversational commentary.`;
 
-  const models = await getAvailableFlashModels(geminiKey);
+  // Direct fast model order (no slow GET /models network overhead)
+  const models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"];
+  let lastError = null;
+
   for (const model of models) {
     try {
       const res = await fetch(
@@ -609,16 +654,22 @@ Technical & Visual Requirements:
           })
         }
       );
-      if (!res.ok) continue;
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        lastError = errData.error?.message || `HTTP ${res.status}`;
+        continue;
+      }
       const data = await res.json();
       let text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
       text = text.replace(/^```html\s*/i, "").replace(/```\s*$/i, "").trim();
       if (text.includes("<html") || text.includes("<!DOCTYPE")) {
         return text;
       }
-    } catch (e) {}
+    } catch (e) {
+      lastError = e.message;
+    }
   }
-  return null;
+  throw new Error(lastError || "Could not generate valid HTML");
 }
 
 // AI Modification Prompt
@@ -634,7 +685,9 @@ Strict Guidelines:
 Existing HTML Code:
 ${existingHtml}`;
 
-  const models = await getAvailableFlashModels(geminiKey);
+  const models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"];
+  let lastError = null;
+
   for (const model of models) {
     try {
       const res = await fetch(
@@ -648,16 +701,22 @@ ${existingHtml}`;
           })
         }
       );
-      if (!res.ok) continue;
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        lastError = errData.error?.message || `HTTP ${res.status}`;
+        continue;
+      }
       const data = await res.json();
       let text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
       text = text.replace(/^```html\s*/i, "").replace(/```\s*$/i, "").trim();
       if (text.includes("<html") || text.includes("<!DOCTYPE")) {
         return text;
       }
-    } catch (e) {}
+    } catch (e) {
+      lastError = e.message;
+    }
   }
-  return null;
+  throw new Error(lastError || "Could not modify website");
 }
 
 // Injects Mobile-Friendly Visual Tap-to-Edit Mode & Floating Action Bar
@@ -787,41 +846,6 @@ function injectBrandingFooter(html) {
     return html.replace("</body>", `${badge}</body>`);
   }
   return html + badge;
-}
-
-// Model Fallback Discovery
-async function getAvailableFlashModels(geminiKey) {
-  if (CACHED_MODELS && CACHED_MODELS.length > 0) return CACHED_MODELS;
-  try {
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models?key=${geminiKey}`
-    );
-    if (res.ok) {
-      const data = await res.json();
-      const allModels = (data.models || [])
-        .filter(
-          m =>
-            Array.isArray(m.supportedGenerationMethods) &&
-            m.supportedGenerationMethods.includes("generateContent") &&
-            m.name.includes("gemini") &&
-            !m.name.includes("tts") &&
-            !m.name.includes("image") &&
-            !m.name.includes("embedding") &&
-            !m.name.includes("robotics") &&
-            !m.name.includes("computer-use") &&
-            !m.name.includes("1.5")
-        )
-        .map(m => m.name.replace(/^models\//, ""));
-
-      allModels.sort((a, b) => (a.includes("flash") ? 0 : 1) - (b.includes("flash") ? 0 : 1));
-
-      if (allModels.length > 0) {
-        CACHED_MODELS = allModels.slice(0, 6);
-        return CACHED_MODELS;
-      }
-    }
-  } catch (e) {}
-  return ["gemini-2.5-flash", "gemini-2.0-flash"];
 }
 
 // User Registration in KV Database
