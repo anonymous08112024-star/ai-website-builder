@@ -40,11 +40,49 @@ export default {
       html += `<p><b>Admin ID Locked To:</b> ${ADMIN_ID}</p>`;
       html += `<p><b>Permanent Database (BOT_DB):</b> ${db ? "✅ Active & Permanent" : "⚠️ Running in RAM Mode"}</p>`;
       html += `<p><b>Hosting Domain:</b> ${url.origin}/site/[slug]</p>`;
+      html += `<p><b>Tap-to-Edit Visual Editor:</b> Active via ${url.origin}/site/[slug]?edit=true</p>`;
 
       return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
     }
 
-    // 2. Live Website Hosting Route (/site/:slug)
+    // 2. API: Save Visual In-Browser Edits back to KV & RAM
+    if (url.pathname === "/api/save-site" && request.method === "POST") {
+      try {
+        const body = await request.json();
+        const slug = (body.slug || "").trim().toLowerCase();
+        let updatedHtml = body.html || "";
+
+        if (!slug || !updatedHtml) {
+          return new Response(JSON.stringify({ ok: false, error: "Missing slug or html" }), {
+            status: 400,
+            headers: { "content-type": "application/json" }
+          });
+        }
+
+        // Clean out injected editor toolbar so saved site is 100% clean
+        updatedHtml = updatedHtml.replace(/<!-- START_EDITOR -->[\s\S]*?<!-- END_EDITOR -->/g, "");
+
+        // Ensure branding footer stays present
+        updatedHtml = injectBrandingFooter(updatedHtml);
+
+        SITE_CACHE.set(slug, updatedHtml);
+        if (db) {
+          await db.put(`site_${slug}`, updatedHtml);
+          await incrementStat(db, "edits");
+        }
+
+        return new Response(JSON.stringify({ ok: true, slug }), {
+          headers: { "content-type": "application/json" }
+        });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: err.message }), {
+          status: 500,
+          headers: { "content-type": "application/json" }
+        });
+      }
+    }
+
+    // 3. Live Website Hosting & Visual Editor Route (/site/:slug)
     if (url.pathname.startsWith("/site/")) {
       const slug = url.pathname.replace("/site/", "").trim().toLowerCase();
       let htmlContent = SITE_CACHE.get(slug);
@@ -57,10 +95,13 @@ export default {
       }
 
       if (htmlContent) {
-        return new Response(htmlContent, {
+        const isEditMode = url.searchParams.get("edit") === "true";
+        const finalOutput = isEditMode ? injectVisualEditor(htmlContent, slug, url.origin) : htmlContent;
+
+        return new Response(finalOutput, {
           headers: {
             "content-type": "text/html; charset=utf-8",
-            "cache-control": "public, max-age=3600"
+            "cache-control": isEditMode ? "no-store, no-cache" : "public, max-age=1800"
           }
         });
       }
@@ -71,7 +112,7 @@ export default {
       );
     }
 
-    // 3. Telegram Webhook Handler
+    // 4. Telegram Webhook Handler
     if (request.method === "POST" && url.pathname === "/webhook") {
       try {
         const update = await request.json();
@@ -104,7 +145,7 @@ async function handleUpdate(update, botToken, geminiKey, db, originUrl) {
       if (joined) {
         await tgApi(botToken, "answerCallbackQuery", {
           callback_query_id: cb.id,
-          text: "✅ Verified! You can now build websites."
+          text: "✅ Verified! You can now build & edit websites."
         });
         await sendWelcomeMenu(botToken, chatId, userId);
       } else {
@@ -258,7 +299,7 @@ async function handleUpdate(update, botToken, geminiKey, db, originUrl) {
     const channelHandle = CHANNEL_USERNAME.replace("@", "");
     await tgApi(botToken, "sendMessage", {
       chat_id: chatId,
-      text: `🔒 *Welcome to Instant AI Website Creator!*\n\nTo build and host free live websites, please join our official hub ${CHANNEL_USERNAME} first:`,
+      text: `🔒 *Welcome to Instant AI Website Creator!*\n\nTo build and customize free live websites, please join our official hub ${CHANNEL_USERNAME} first:`,
       parse_mode: "Markdown",
       reply_markup: {
         inline_keyboard: [
@@ -277,11 +318,32 @@ async function handleUpdate(update, botToken, geminiKey, db, originUrl) {
 
   if (!text) return;
 
+  // Check if this is an AI edit request for user's previous website
+  const isEditCommand = text.startsWith("/edit ") || (msg.reply_to_message && msg.reply_to_message.text && msg.reply_to_message.text.includes("Live Link:"));
+  if (isEditCommand) {
+    let editInstructions = text.replace(/^\/edit\s*/i, "").trim();
+    let targetSlug = null;
+
+    if (msg.reply_to_message && msg.reply_to_message.text) {
+      const match = msg.reply_to_message.text.match(/\/site\/([a-z0-9\-]+)/i);
+      if (match) targetSlug = match[1].toLowerCase();
+    }
+
+    if (!targetSlug && db) {
+      targetSlug = await db.get(`u_last_site_${userId}`);
+    }
+
+    if (targetSlug) {
+      await modifyWebsiteWithAI(botToken, geminiKey, db, chatId, userId, targetSlug, editInstructions, originUrl);
+      return;
+    }
+  }
+
   // Generate and Deploy Live Website from Casual Prompt
   await generateAndDeployWebsite(botToken, geminiKey, db, chatId, userId, text, originUrl);
 }
 
-// Welcome Menu with Demo Templates
+// Welcome Menu with Demo Templates & Feature Overview
 async function sendWelcomeMenu(botToken, chatId, userId) {
   const channelHandle = CHANNEL_USERNAME.replace("@", "");
   const keyboard = [
@@ -301,26 +363,32 @@ async function sendWelcomeMenu(botToken, chatId, userId) {
 
   await tgApi(botToken, "sendMessage", {
     chat_id: chatId,
-    text: `🚀 *Instant AI Website Creator*\n\nDescribe the website you want in casual English or Hindi:\n\n• *Business:* Gym, Cafe, Restaurant, Dental Clinic\n• *Portfolio:* Photography, Freelancer, Coding, Resume\n• *Store / Agency:* Clothing Brand, Real Estate, Consulting\n\n_Example: "Create a modern dark-mode website for a sneaker store named KicksHub in Jaipur with product cards and WhatsApp order button."_\n\n👇 *Send your prompt now or try a demo template below:*`,
+    text: `🚀 *Instant AI Website Creator & Visual Editor*\n\nDescribe the website you want in casual English or Hindi:\n\n• *Business:* Gym, Cafe, Restaurant, Dental Clinic\n• *Portfolio:* Photography, Freelancer, Coding, Resume\n• *Store / Agency:* Clothing Brand, Real Estate, Consulting\n\n✨ *New Features:*\n1. 🌐 *Instant Edge Hosting:* Live link generated in ~8 seconds.\n2. ✏️ *Visual Tap-to-Edit:* Tap any headline, price, or text on your phone to customize it, then save live in 1 tap!\n3. 🤖 *AI Revisions:* Reply to any site with changes or type \`/edit make it dark mode\`.\n\n_Example: "Create a modern dark-mode website for a sneaker store named KicksHub in Jaipur with product cards and WhatsApp order button."_\n\n👇 *Send your prompt now or try a demo template below:*`,
     parse_mode: "Markdown",
     reply_markup: { inline_keyboard: keyboard }
   });
 }
 
-// Main AI Generation & Deployment Pipeline
+// Main AI Generation & Deployment Pipeline with Dynamic Visual Progress
 async function generateAndDeployWebsite(botToken, geminiKey, db, chatId, userId, userPrompt, originUrl) {
+  // 1. Initial Animated Progress Tracker Message
   const statusMsg = await tgApi(botToken, "sendMessage", {
     chat_id: chatId,
-    text: "⚙️ _Designing your website layout, mobile-responsive CSS & components... (Takes ~8 seconds)_",
+    text: `⚡ *Analyzing your prompt...*\n\`[▓░░░░░░░░░] 10%\` Designing layout & color palette...`,
     parse_mode: "Markdown"
   });
 
-  const rawHtml = await generateWebsiteCodeWithGemini(geminiKey, userPrompt);
+  const msgId = statusMsg.result?.message_id;
 
-  if (statusMsg.result?.message_id) {
+  // 2. Start Gemini Generation alongside Dynamic Visual Progress Steps
+  const aiPromise = generateWebsiteCodeWithGemini(geminiKey, userPrompt);
+  const rawHtml = await trackProgress(botToken, chatId, msgId, aiPromise);
+
+  // 3. Delete progress message cleanly
+  if (msgId) {
     await tgApi(botToken, "deleteMessage", {
       chat_id: chatId,
-      message_id: statusMsg.result.message_id
+      message_id: msgId
     });
   }
 
@@ -333,21 +401,23 @@ async function generateAndDeployWebsite(botToken, geminiKey, db, chatId, userId,
     return;
   }
 
-  // Generate URL slug and embed watermark
+  // 4. Generate URL slug & embed watermark
   const cleanSlug = generateSlugFromPrompt(userPrompt);
   const finalHtml = injectBrandingFooter(rawHtml);
 
-  // Store permanently in KV database & fast RAM
+  // 5. Store permanently in KV database & RAM cache
   SITE_CACHE.set(cleanSlug, finalHtml);
   if (db) {
     try {
       await db.put(`site_${cleanSlug}`, finalHtml);
+      await db.put(`u_last_site_${userId}`, cleanSlug);
       await incrementStat(db, "sites_created");
     } catch (e) {}
   }
 
   const liveUrl = `${originUrl}/site/${cleanSlug}`;
-  const shareText = encodeURIComponent(`Check out my new website built in 10 seconds with @InstantMP3SongBot 🚀: ${liveUrl}`);
+  const editUrl = `${originUrl}/site/${cleanSlug}?edit=true`;
+  const shareText = encodeURIComponent(`Check out my new website built in 8 seconds with ${CHANNEL_USERNAME} 🚀: ${liveUrl}`);
   const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(liveUrl)}&text=${shareText}`;
   const channelHandle = CHANNEL_USERNAME.replace("@", "");
 
@@ -355,22 +425,27 @@ async function generateAndDeployWebsite(botToken, geminiKey, db, chatId, userId,
     inline_keyboard: [
       [
         { text: "🌐 Open Live Website", url: liveUrl },
-        { text: "📲 Share Website", url: shareUrl }
+        { text: "✏️ Tap-to-Edit on Phone", url: editUrl }
       ],
-      [{ text: `📢 Official Hub (${CHANNEL_USERNAME})`, url: `https://t.me/${channelHandle}` }]
+      [
+        { text: "📲 Share Website", url: shareUrl },
+        { text: `📢 Join ${CHANNEL_USERNAME}`, url: `https://t.me/${channelHandle}` }
+      ]
     ]
   };
 
-  let caption = `🎉 *Your Website is Live & Hosted Online!*\n\n`;
-  caption += `🔗 *Live Link:* \`${liveUrl}\`\n\n`;
-  caption += `✨ *Features Included:*\n`;
-  caption += `• Mobile-Responsive Modern Layout\n`;
-  caption += `• Tailwind CSS Styling & Glassmorphic Cards\n`;
-  caption += `• Interactive WhatsApp Action Buttons\n`;
-  caption += `• Hosted 24/7 with 0ms Load Time\n\n`;
-  caption += `_Tap "Open Live Website" below to see it live in your browser!_`;
+  let caption = `🎉 *Your Website is Live & Ready to Customize!*\n\n`;
+  caption += `🔗 *Live Link:* \`${liveUrl}\`\n`;
+  caption += `✏️ *Visual Editor:* [Open Tap-to-Edit Mode](${editUrl})\n\n`;
+  caption += `✨ *Highlights & Features:*\n`;
+  caption += `• *100% Mobile Responsive* with Tailwind CSS\n`;
+  caption += `• *Dynamic Visuals:* Floating gradients, hover lift & glowing glass cards\n`;
+  caption += `• *Interactive WhatsApp CTA:* Floating animated booking button\n`;
+  caption += `• *Visual In-Browser Editor:* Tap any text or price on screen & save live!\n`;
+  caption += `• *AI Revisions:* Reply to this message with \`/edit <changes>\` anytime.\n\n`;
+  caption += `_Tap "Open Live Website" to view or "Tap-to-Edit on Phone" to customize text!_`;
 
-  // 1. Send confirmation with interactive buttons
+  // Send delivery announcement
   await tgApi(botToken, "sendMessage", {
     chat_id: chatId,
     text: caption,
@@ -378,11 +453,11 @@ async function generateAndDeployWebsite(botToken, geminiKey, db, chatId, userId,
     reply_markup: actionButtons
   });
 
-  // 2. Send index.html file so user can download the raw source code
+  // Send standalone index.html source code file
   try {
     const form = new FormData();
     form.append("chat_id", String(chatId));
-    form.append("caption", `📄 *index.html* source code for your website.`);
+    form.append("caption", `📄 *index.html* standalone source code for \`${cleanSlug}\`.\nOpen directly in any browser or host on GitHub Pages!`);
     form.append("parse_mode", "Markdown");
     form.append("document", new Blob([finalHtml], { type: "text/html" }), `${cleanSlug}.html`);
 
@@ -393,27 +468,131 @@ async function generateAndDeployWebsite(botToken, geminiKey, db, chatId, userId,
   } catch (e) {}
 }
 
-// Master AI Prompt for Production-Grade HTML5/Tailwind Websites
+// AI Modification Engine for Existing Websites
+async function modifyWebsiteWithAI(botToken, geminiKey, db, chatId, userId, slug, editPrompt, originUrl) {
+  let existingHtml = SITE_CACHE.get(slug);
+  if (!existingHtml && db) {
+    existingHtml = await db.get(`site_${slug}`);
+  }
+
+  if (!existingHtml) {
+    await tgApi(botToken, "sendMessage", {
+      chat_id: chatId,
+      text: "⚠️ *Website not found.* Send a new prompt to create one from scratch!",
+      parse_mode: "Markdown"
+    });
+    return;
+  }
+
+  const statusMsg = await tgApi(botToken, "sendMessage", {
+    chat_id: chatId,
+    text: `⚡ *Applying your modifications...*\n\`[▓▓▓░░░░░░░] 30%\` Updating design & text with AI...`,
+    parse_mode: "Markdown"
+  });
+
+  const msgId = statusMsg.result?.message_id;
+
+  const aiPromise = refineWebsiteWithGemini(geminiKey, existingHtml, editPrompt);
+  const updatedHtml = await trackProgress(botToken, chatId, msgId, aiPromise);
+
+  if (msgId) {
+    await tgApi(botToken, "deleteMessage", {
+      chat_id: chatId,
+      message_id: msgId
+    });
+  }
+
+  if (!updatedHtml || updatedHtml.length < 200) {
+    await tgApi(botToken, "sendMessage", {
+      chat_id: chatId,
+      text: "😕 *Could not apply changes.* Please describe your edit in more detail!",
+      parse_mode: "Markdown"
+    });
+    return;
+  }
+
+  const cleanUpdatedHtml = injectBrandingFooter(updatedHtml);
+
+  SITE_CACHE.set(slug, cleanUpdatedHtml);
+  if (db) {
+    try {
+      await db.put(`site_${slug}`, cleanUpdatedHtml);
+      await incrementStat(db, "edits");
+    } catch (e) {}
+  }
+
+  const liveUrl = `${originUrl}/site/${slug}`;
+  const editUrl = `${originUrl}/site/${slug}?edit=true`;
+
+  await tgApi(botToken, "sendMessage", {
+    chat_id: chatId,
+    text: `✅ *Your website has been updated!*\n\n🔗 *Updated Live Link:* \`${liveUrl}\`\n✏️ *Visual Editor:* [Open Tap-to-Edit](${editUrl})\n\n_Your changes are live immediately for all visitors!_`,
+    parse_mode: "Markdown",
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: "🌐 Open Updated Website", url: liveUrl },
+          { text: "✏️ Tap-to-Edit on Phone", url: editUrl }
+        ]
+      ]
+    }
+  });
+}
+
+// Dynamic Progress Steps Runner (Updates Telegram status every ~2s)
+async function trackProgress(botToken, chatId, msgId, promise) {
+  if (!msgId) return await promise;
+
+  const steps = [
+    { text: `🎨 *Building responsive layout...*\n\`[▓▓▓▓░░░░░░] 45%\` Styling Tailwind components & glass cards...`, ms: 2000 },
+    { text: `📱 *Injecting dynamic visuals...*\n\`[▓▓▓▓▓▓▓░░░] 75%\` Adding hover transitions, pulsing CTA & icons...`, ms: 2200 },
+    { text: `🚀 *Deploying to Edge CDN...*\n\`[▓▓▓▓▓▓▓▓▓▓] 100%\` Finalizing Cloudflare hosting...`, ms: 1600 }
+  ];
+
+  let completed = false;
+  const runner = promise.then(res => { completed = true; return res; });
+
+  (async () => {
+    for (const step of steps) {
+      await new Promise(r => setTimeout(r, step.ms));
+      if (completed) break;
+      await tgApi(botToken, "editMessageText", {
+        chat_id: chatId,
+        message_id: msgId,
+        text: step.text,
+        parse_mode: "Markdown"
+      });
+    }
+  })();
+
+  return await runner;
+}
+
+// Master AI Prompt for Production-Grade HTML5/Tailwind Websites with Dynamic Visuals
 async function generateWebsiteCodeWithGemini(geminiKey, userPrompt) {
   const systemPrompt = `You are an elite principal web designer and frontend architect.
 The user wants a website described as: "${userPrompt}".
 
 Create a single, complete, production-ready, beautiful, mobile-first HTML5 file.
 
-Requirements:
+Technical & Visual Requirements:
 1. Load Tailwind CSS via CDN: <script src="https://cdn.tailwindcss.com"></script>
-2. Load FontAwesome Icons: <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-3. Choose a sleek, modern palette (e.g. slate-950/cyan for modern tech/fitness, warm amber/stone for cafes, cream/gold for luxury/photography).
-4. Include rich, realistic sections:
-   - Modern Sticky Navbar with logo and mobile menu
-   - Hero Section with bold typography, badges, and call-to-action buttons
-   - Features / Services Grid with high-contrast glassmorphic cards
-   - Pricing or Menu or Gallery Grid (with realistic items, prices in ₹ / $, and highlights)
-   - Testimonials / Social Proof with star ratings
-   - Interactive FAQ Section with vanilla JS toggle
-   - Direct WhatsApp / Contact button: href="https://wa.me/919876543210?text=Hello%20I%20am%20interested"
-   - Polished Footer
-5. Include functional Vanilla JavaScript for mobile menu toggles and FAQ accordion expand/collapse.
+2. Load FontAwesome 6 Icons: <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+3. Choose a sleek, modern palette (e.g. slate-950 with cyan/emerald highlights, warm stone with amber, or deep indigo with violet).
+4. Dynamic Visual Elements:
+   - Floating subtle ambient gradient spheres / mesh background effects (e.g. absolute blur-3xl opacity-20 blobs).
+   - Glassmorphic card styling (bg-white/5 backdrop-blur-md border border-white/10).
+   - Smooth hover transitions (hover:scale-[1.02] hover:shadow-2xl transition-all duration-300).
+   - Pulsing fixed WhatsApp floating button at bottom-right (https://wa.me/919876543210?text=Hello%20I%20am%20interested).
+   - Functional Vanilla JS for mobile navbar hamburger toggle & FAQ accordion collapse/expand.
+5. Rich realistic sections:
+   - Modern Sticky Navbar with logo, links, and "Get Started" CTA button.
+   - High-impact Hero Section with bold typography, badges, and primary/secondary buttons.
+   - Features / Services Grid with high-contrast icons.
+   - Pricing or Menu or Showcase Cards (with realistic items, prices in ₹ / $, and highlights).
+   - Testimonials / Social Proof with avatar badges and 5-star ratings.
+   - Interactive FAQ Section with vanilla JS toggle.
+   - Polished Footer.
 6. Make it completely self-contained. Return ONLY valid raw HTML code without markdown code fences, no backticks, no conversational commentary.`;
 
   const models = await getAvailableFlashModels(geminiKey);
@@ -442,6 +621,145 @@ Requirements:
   return null;
 }
 
+// AI Modification Prompt
+async function refineWebsiteWithGemini(geminiKey, existingHtml, editInstructions) {
+  const prompt = `You are an elite web developer.
+Modify the following existing website HTML based on this user instruction: "${editInstructions}".
+
+Strict Guidelines:
+1. Retain the existing layout, Tailwind CSS, FontAwesome, and functionality unless specifically asked to change them.
+2. Return ONLY the complete, updated raw HTML code starting with <!DOCTYPE html> and ending with </html>.
+3. No markdown fences, no backticks, no explanatory comments.
+
+Existing HTML Code:
+${existingHtml}`;
+
+  const models = await getAvailableFlashModels(geminiKey);
+  for (const model of models) {
+    try {
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: { temperature: 0.2 }
+          })
+        }
+      );
+      if (!res.ok) continue;
+      const data = await res.json();
+      let text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+      text = text.replace(/^```html\s*/i, "").replace(/```\s*$/i, "").trim();
+      if (text.includes("<html") || text.includes("<!DOCTYPE")) {
+        return text;
+      }
+    } catch (e) {}
+  }
+  return null;
+}
+
+// Injects Mobile-Friendly Visual Tap-to-Edit Mode & Floating Action Bar
+function injectVisualEditor(html, slug, origin) {
+  const editorToolbar = `
+<!-- START_EDITOR -->
+<style>
+  [contenteditable="true"] { outline: 1px dashed rgba(56, 189, 248, 0.4) !important; outline-offset: 3px; cursor: text; }
+  [contenteditable="true"]:focus { outline: 2px solid #38bdf8 !important; background: rgba(56, 189, 248, 0.08) !important; border-radius: 4px; }
+  #editor-floating-bar {
+    position: fixed;
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 999999;
+    background: rgba(15, 23, 42, 0.95);
+    backdrop-filter: blur(16px);
+    color: #ffffff;
+    padding: 10px 20px;
+    border-radius: 9999px;
+    box-shadow: 0 12px 35px rgba(0,0,0,0.5);
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    font-family: system-ui, -apple-system, sans-serif;
+    font-size: 13px;
+    border: 1px solid rgba(255,255,255,0.18);
+    width: max-content;
+    max-width: 92vw;
+  }
+  #save-btn {
+    background: #10B981;
+    color: #ffffff;
+    border: none;
+    padding: 8px 18px;
+    border-radius: 9999px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  #save-btn:active { transform: scale(0.95); }
+  #save-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+</style>
+<div id="editor-floating-bar">
+  <span>✏️ <b>Tap any text to edit</b></span>
+  <button id="save-btn" onclick="saveSiteContent()">💾 Save Changes</button>
+  <a href="${origin}/site/${slug}" style="color:#94a3b8;text-decoration:none;font-weight:500;">Preview Live ↗</a>
+</div>
+<script>
+  // Enable inline editing on all text elements except editor bar & badges
+  document.querySelectorAll('h1, h2, h3, h4, h5, h6, p, span, a, li, button').forEach(el => {
+    if (!el.closest('#editor-floating-bar') && !el.closest('#sr-brand-badge')) {
+      el.setAttribute('contenteditable', 'true');
+    }
+  });
+
+  async function saveSiteContent() {
+    const btn = document.getElementById('save-btn');
+    btn.innerHTML = '⏳ Saving...';
+    btn.disabled = true;
+
+    // Clone and remove editable flags before saving
+    const clone = document.documentElement.cloneNode(true);
+    clone.querySelectorAll('[contenteditable]').forEach(el => el.removeAttribute('contenteditable'));
+
+    // Strip editor bar from clone
+    const editorEl = clone.querySelector('#editor-floating-bar');
+    if (editorEl) editorEl.remove();
+
+    try {
+      const res = await fetch('${origin}/api/save-site', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ slug: '${slug}', html: '<!DOCTYPE html>\\n' + clone.outerHTML })
+      });
+      const data = await res.json();
+      if (data.ok) {
+        btn.innerHTML = '✅ Saved Live!';
+        setTimeout(() => { btn.innerHTML = '💾 Save Changes'; btn.disabled = false; }, 2500);
+      } else {
+        alert('Save failed: ' + (data.error || 'Unknown error'));
+        btn.innerHTML = '💾 Save Changes';
+        btn.disabled = false;
+      }
+    } catch(err) {
+      alert('Error saving changes: ' + err.message);
+      btn.innerHTML = '💾 Save Changes';
+      btn.disabled = false;
+    }
+  }
+</script>
+<!-- END_EDITOR -->
+`;
+  if (html.includes("</body>")) {
+    return html.replace("</body>", `${editorToolbar}</body>`);
+  }
+  return html + editorToolbar;
+}
+
 // Generates a Clean URL Slug from User Prompt
 function generateSlugFromPrompt(prompt) {
   const words = prompt
@@ -458,7 +776,7 @@ function generateSlugFromPrompt(prompt) {
 // Injects Sleek Watermark Badge into Footer
 function injectBrandingFooter(html) {
   const badge = `
-  <div style="position:fixed;bottom:12px;right:12px;z-index:9999;font-family:sans-serif;">
+  <div id="sr-brand-badge" style="position:fixed;bottom:12px;right:12px;z-index:9999;font-family:sans-serif;">
     <a href="https://t.me/${CHANNEL_USERNAME.replace("@", "")}" target="_blank" style="display:flex;align-items:center;gap:6px;background:rgba(15,23,42,0.85);backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,0.15);padding:6px 12px;border-radius:999px;color:#fff;text-decoration:none;font-size:12px;box-shadow:0 4px 12px rgba(0,0,0,0.3);">
       <span style="color:#38bdf8;">⚡ Built with</span>
       <span style="font-weight:700;">${CHANNEL_USERNAME}</span>
@@ -554,15 +872,19 @@ async function incrementStat(db, key) {
 async function getStatsData(db) {
   const users = await getAllUsers(db);
   let sites = MEM_STATS.sites_created;
+  let edits = MEM_STATS.edits;
   if (db) {
     try {
       const s = await db.get("stat_sites_created");
       if (s) sites = Math.max(sites, Number(s));
+      const e = await db.get("stat_edits");
+      if (e) edits = Math.max(edits, Number(e));
     } catch (e) {}
   }
   return {
     userCount: users.length,
-    sites
+    sites,
+    edits
   };
 }
 
@@ -684,6 +1006,7 @@ async function sendAdminPanel(botToken, db, chatId, editMsgId) {
     text += `• 📢 *${CHANNEL_USERNAME} Subscribers:* ${channelMembers}\n`;
   }
   text += `• 🌐 *Total Websites Created & Hosted:* ${stats.sites}\n`;
+  text += `• ✏️ *Total Website Customizations & Edits:* ${stats.edits}\n`;
   text += `• 💾 *Storage Engine:* ${db ? "Permanent Cloudflare KV (`BOT_DB`)" : "⚠️ RAM Mode"}\n\n`;
   text += `_Tap a button below to broadcast an announcement, export your user list, or refresh stats:_`;
 
