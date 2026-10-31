@@ -38,7 +38,7 @@ export default {
       let html = `<h2>${tgData.ok ? "✅ Instant AI Website Creator Live!" : "❌ Telegram Token Error"}</h2>`;
       html += `<p><b>Telegram Status:</b> ${tgData.ok ? "Connected to " + CHANNEL_USERNAME : JSON.stringify(tgData)}</p>`;
       html += `<p><b>Admin ID Locked To:</b> ${ADMIN_ID}</p>`;
-      html += `<p><b>Permanent Database (BOT_DB):</b> ${db ? "✅ Active & Permanent" : "⚠️ Running in RAM Mode"}</p>`;
+      html += `<p><b>Permanent Database (BOT_DB):</b> ${db ? "<span style='color:green;'>✅ Active & Permanent (No 404s)</span>" : "<span style='color:red;font-weight:bold;'>❌ MISSING! Go to Settings &rarr; Bindings &rarr; Add KV namespace 'BOT_DB'</span>"}</p>`;
       html += `<p><b>Hosting Domain:</b> ${url.origin}/site/[slug]</p>`;
       html += `<p><b>Tap-to-Edit Visual Editor:</b> Active via ${url.origin}/site/[slug]?edit=true</p>`;
 
@@ -84,14 +84,23 @@ export default {
 
     // 3. Live Website Hosting & Visual Editor Route (/site/:slug)
     if (url.pathname.startsWith("/site/")) {
-      const slug = url.pathname.replace("/site/", "").trim().toLowerCase();
-      let htmlContent = SITE_CACHE.get(slug);
+      const match = url.pathname.match(/^\/site\/([a-zA-Z0-9_\-]+)/i);
+      const slug = match ? match[1].toLowerCase() : "";
 
-      if (!htmlContent && db) {
+      let htmlContent = slug ? SITE_CACHE.get(slug) : null;
+
+      if (!htmlContent && db && slug) {
         try {
           htmlContent = await db.get(`site_${slug}`);
+          // Brief retry to account for global edge propagation
+          if (!htmlContent) {
+            await new Promise((r) => setTimeout(r, 600));
+            htmlContent = await db.get(`site_${slug}`);
+          }
           if (htmlContent) SITE_CACHE.set(slug, htmlContent);
-        } catch (e) {}
+        } catch (e) {
+          console.error("KV fetch error:", e);
+        }
       }
 
       if (htmlContent) {
@@ -106,9 +115,20 @@ export default {
         });
       }
 
+      // If site not found, show actionable diagnostic
+      const kvWarning = !db
+        ? `<div style="margin-top:15px;padding:12px;background:#ef444422;border:1px solid #ef4444;border-radius:10px;font-size:12px;color:#fca5a5;">⚠️ <b>Admin Notice:</b> Cloudflare KV binding <code>BOT_DB</code> is missing. Add it in <b>Worker Settings &rarr; Bindings</b> so websites persist across all devices.</div>`
+        : "";
+
       return new Response(
-        `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Website Not Found</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-slate-950 text-white min-h-screen flex items-center justify-center p-6 text-center"><div class="max-w-md bg-slate-900 border border-slate-800 rounded-2xl p-8 shadow-2xl"><h1 class="text-4xl font-extrabold text-cyan-400 mb-3">404</h1><h2 class="text-xl font-bold mb-2">Website Not Found</h2><p class="text-slate-400 text-sm mb-6">This website may have been moved or the link is incorrect.</p><a href="https://t.me/${CHANNEL_USERNAME.replace("@", "")}" class="inline-block bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-semibold px-6 py-3 rounded-xl transition">Build Your Website Free</a></div></body></html>`,
-        { status: 404, headers: { "content-type": "text/html; charset=utf-8" } }
+        `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Website Not Found</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-slate-950 text-white min-h-screen flex items-center justify-center p-6 text-center"><div class="max-w-md bg-slate-900 border border-slate-800 rounded-2xl p-8 shadow-2xl"><h1 class="text-4xl font-extrabold text-cyan-400 mb-3">404</h1><h2 class="text-xl font-bold mb-2">Website Not Found</h2><p class="text-slate-400 text-sm mb-6">This website may have been moved or the link is incorrect.</p>${kvWarning}<div class="mt-6"><a href="https://t.me/${CHANNEL_USERNAME.replace("@", "")}" class="inline-block bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-semibold px-6 py-3 rounded-xl transition">Build Your Website Free</a></div></div></body></html>`,
+        {
+          status: 404,
+          headers: {
+            "content-type": "text/html; charset=utf-8",
+            "cache-control": "no-store, no-cache, must-revalidate"
+          }
+        }
       );
     }
 
@@ -387,7 +407,7 @@ async function sendWelcomeMenu(botToken, chatId, userId) {
   });
 }
 
-// Main AI Generation & Deployment Pipeline with Realistic Progress Steps
+// Main AI Generation & Deployment Pipeline
 async function generateAndDeployWebsite(botToken, geminiKey, db, chatId, userId, userPrompt, originUrl) {
   // 1. Initial Animated Progress Tracker Message
   const statusMsg = await tgApi(botToken, "sendMessage", {
@@ -407,28 +427,20 @@ async function generateAndDeployWebsite(botToken, geminiKey, db, chatId, userId,
       throw new Error("AI returned empty or invalid HTML. Please try again!");
     }
 
-    // 3. Mark 100% when HTML is received and being saved
-    if (msgId) {
-      await tgApi(botToken, "editMessageText", {
-        chat_id: chatId,
-        message_id: msgId,
-        text: `🚀 *Deploying to Edge CDN...*\n\`[▓▓▓▓▓▓▓▓▓▓] 100%\` Finalizing Cloudflare hosting...`,
-        parse_mode: "Markdown"
-      });
-    }
-
-    // 4. Generate URL slug & embed watermark
+    // 3. Generate clean slug & embed watermark
     const cleanSlug = generateSlugFromPrompt(userPrompt);
     const finalHtml = injectBrandingFooter(rawHtml);
 
-    // 5. Store permanently in KV database & RAM cache
+    // 4. Store permanently in KV database & RAM cache
     SITE_CACHE.set(cleanSlug, finalHtml);
     if (db) {
       try {
         await db.put(`site_${cleanSlug}`, finalHtml);
         await db.put(`u_last_site_${userId}`, cleanSlug);
         await incrementStat(db, "sites_created");
-      } catch (e) {}
+      } catch (e) {
+        console.error("KV put error:", e);
+      }
     }
 
     const liveUrl = `${originUrl}/site/${cleanSlug}`;
@@ -459,9 +471,14 @@ async function generateAndDeployWebsite(botToken, geminiKey, db, chatId, userId,
     caption += `• *Interactive WhatsApp CTA:* Floating animated booking button\n`;
     caption += `• *Visual In-Browser Editor:* Tap any text or price on screen & save live!\n`;
     caption += `• *AI Revisions:* Reply to this message with \`/edit <changes>\` anytime.\n\n`;
+
+    if (!db) {
+      caption += `⚠️ *Note:* Cloudflare KV \`BOT_DB\` is not bound yet. Bind it in Cloudflare Settings &rarr; Bindings to keep links permanent!\n\n`;
+    }
+
     caption += `_Tap "Open Live Website" to view or "Tap-to-Edit on Phone" to customize text!_`;
 
-    // 6. Smoothly transform the progress message directly into the finished delivery card
+    // 5. Seamlessly transform the progress message directly into the finished delivery card!
     if (msgId) {
       await tgApi(botToken, "editMessageText", {
         chat_id: chatId,
@@ -479,7 +496,7 @@ async function generateAndDeployWebsite(botToken, geminiKey, db, chatId, userId,
       });
     }
 
-    // 7. Send standalone index.html source code file
+    // 6. Send standalone index.html source code file
     try {
       const form = new FormData();
       form.append("chat_id", String(chatId));
@@ -586,9 +603,9 @@ async function trackProgress(botToken, chatId, msgId, promise) {
   if (!msgId) return await promise;
 
   const steps = [
-    { text: `🎨 *Building responsive layout...*\n\`[▓▓▓▓░░░░░░] 45%\` Styling Tailwind components & glass cards...`, ms: 2200 },
-    { text: `📱 *Injecting dynamic visuals...*\n\`[▓▓▓▓▓▓▓░░░] 75%\` Adding hover transitions, pulsing CTA & icons...`, ms: 2800 },
-    { text: `⚡ *Finalizing code architecture...*\n\`[▓▓▓▓▓▓▓▓▓░] 90%\` Optimizing mobile responsiveness...`, ms: 3200 }
+    { text: `🎨 *Building responsive layout...*\n\`[▓▓▓▓░░░░░░] 45%\` Styling Tailwind components & glass cards...`, ms: 2400 },
+    { text: `📱 *Injecting dynamic visuals...*\n\`[▓▓▓▓▓▓▓░░░] 75%\` Adding hover transitions, pulsing CTA & icons...`, ms: 3000 },
+    { text: `⚡ *Finalizing code architecture...*\n\`[▓▓▓▓▓▓▓▓▓░] 92%\` Optimizing mobile responsiveness...`, ms: 3500 }
   ];
 
   let completed = false;
@@ -637,7 +654,6 @@ Technical & Visual Requirements:
    - Polished Footer.
 6. Make it completely self-contained. Return ONLY valid raw HTML code without markdown code fences, no backticks, no conversational commentary.`;
 
-  // Direct fast model order (no slow GET /models network overhead)
   const models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"];
   let lastError = null;
 
@@ -819,14 +835,14 @@ function injectVisualEditor(html, slug, origin) {
   return html + editorToolbar;
 }
 
-// Generates a Clean URL Slug from User Prompt
+// Generates a Clean URL Slug from User Prompt (Short & Safe)
 function generateSlugFromPrompt(prompt) {
   const words = prompt
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, "")
     .trim()
     .split(/\s+/)
-    .slice(0, 3)
+    .slice(0, 2)
     .join("-");
   const rand = Math.random().toString(36).slice(2, 6);
   return `${words || "site"}-${rand}`;
