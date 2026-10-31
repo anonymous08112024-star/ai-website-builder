@@ -12,6 +12,7 @@ const MEM_STATS = {
 };
 const PROCESSED_UPDATES = new Set();
 let ADMIN_BROADCAST_MODE = false;
+let CACHED_MODELS = null;
 
 export default {
   async fetch(request, env, ctx) {
@@ -35,9 +36,21 @@ export default {
       );
       const tgData = await tgRes.json();
 
+      // Test active Gemini models
+      let geminiStatus = "⚠️ Not Tested";
+      try {
+        const activeModels = await getAvailableFlashModels(geminiKey);
+        geminiStatus = activeModels && activeModels.length > 0
+          ? `<span style='color:green;'>✅ Active (${activeModels.slice(0, 3).join(", ")})</span>`
+          : "<span style='color:red;'>❌ No models available</span>";
+      } catch (err) {
+        geminiStatus = `<span style='color:red;'>❌ Error: ${err.message}</span>`;
+      }
+
       let html = `<h2>${tgData.ok ? "✅ Instant AI Website Creator Live!" : "❌ Telegram Token Error"}</h2>`;
       html += `<p><b>Telegram Status:</b> ${tgData.ok ? "Connected to " + CHANNEL_USERNAME : JSON.stringify(tgData)}</p>`;
       html += `<p><b>Admin ID Locked To:</b> ${ADMIN_ID}</p>`;
+      html += `<p><b>Google Gemini AI Engine:</b> ${geminiStatus}</p>`;
       html += `<p><b>Permanent Database (BOT_DB):</b> ${db ? "<span style='color:green;'>✅ Active & Permanent (No 404s)</span>" : "<span style='color:red;font-weight:bold;'>❌ MISSING! Go to Settings &rarr; Bindings &rarr; Add KV namespace 'BOT_DB'</span>"}</p>`;
       html += `<p><b>Hosting Domain:</b> ${url.origin}/site/[slug]</p>`;
       html += `<p><b>Tap-to-Edit Visual Editor:</b> Active via ${url.origin}/site/[slug]?edit=true</p>`;
@@ -654,7 +667,7 @@ Technical & Visual Requirements:
    - Polished Footer.
 6. Make it completely self-contained. Return ONLY valid raw HTML code without markdown code fences, no backticks, no conversational commentary.`;
 
-  const models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"];
+  const models = await getAvailableFlashModels(geminiKey);
   let lastError = null;
 
   for (const model of models) {
@@ -672,7 +685,7 @@ Technical & Visual Requirements:
       );
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
-        lastError = errData.error?.message || `HTTP ${res.status}`;
+        lastError = errData.error?.message || `HTTP ${res.status} (${model})`;
         continue;
       }
       const data = await res.json();
@@ -701,7 +714,7 @@ Strict Guidelines:
 Existing HTML Code:
 ${existingHtml}`;
 
-  const models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"];
+  const models = await getAvailableFlashModels(geminiKey);
   let lastError = null;
 
   for (const model of models) {
@@ -719,7 +732,7 @@ ${existingHtml}`;
       );
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
-        lastError = errData.error?.message || `HTTP ${res.status}`;
+        lastError = errData.error?.message || `HTTP ${res.status} (${model})`;
         continue;
       }
       const data = await res.json();
@@ -733,6 +746,40 @@ ${existingHtml}`;
     }
   }
   throw new Error(lastError || "Could not modify website");
+}
+
+// Model Fallback Discovery (Cached in RAM so it only runs once)
+async function getAvailableFlashModels(geminiKey) {
+  if (CACHED_MODELS && CACHED_MODELS.length > 0) return CACHED_MODELS;
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models?key=${geminiKey}`
+    );
+    if (res.ok) {
+      const data = await res.json();
+      const allModels = (data.models || [])
+        .filter(
+          (m) =>
+            Array.isArray(m.supportedGenerationMethods) &&
+            m.supportedGenerationMethods.includes("generateContent") &&
+            m.name.includes("gemini") &&
+            !m.name.includes("embedding") &&
+            !m.name.includes("imagen")
+        )
+        .map((m) => m.name.replace(/^models\//, ""));
+
+      // Sort flash models to the front for fastest generation
+      allModels.sort((a, b) => (b.includes("flash") ? 1 : 0) - (a.includes("flash") ? 1 : 0));
+
+      if (allModels.length > 0) {
+        CACHED_MODELS = allModels;
+        return CACHED_MODELS;
+      }
+    }
+  } catch (e) {
+    console.error("ListModels discovery failed:", e);
+  }
+  return ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-2.0-flash-exp", "gemini-pro"];
 }
 
 // Injects Mobile-Friendly Visual Tap-to-Edit Mode & Floating Action Bar
@@ -852,7 +899,7 @@ function generateSlugFromPrompt(prompt) {
 function injectBrandingFooter(html) {
   const badge = `
   <div id="sr-brand-badge" style="position:fixed;bottom:12px;right:12px;z-index:9999;font-family:sans-serif;">
-    <a href="https://t.me/${CHANNEL_USERNAME.replace("@", "")}" target="_blank" style="display:flex;align-items:center;gap:6px;background:rgba(15,23,42,0.85);backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,0.15);padding:6px 12px;border-radius:999px;color:#fff;text-decoration:none;font-size:12px;box-shadow:0 4px 12px rgba(0,0,0,0.3);">
+    <a href="https://t.me/${CHANNEL_USERNAME.replace("@", "")}" target="_blank" style="display:flex;align-items:center;gap:6px;background:rgba(15,23,42,0.85);backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,0.15);padding:6px 12px;border-radius:9999px;color:#fff;text-decoration:none;font-size:12px;box-shadow:0 4px 12px rgba(0,0,0,0.3);">
       <span style="color:#38bdf8;">⚡ Built with</span>
       <span style="font-weight:700;">${CHANNEL_USERNAME}</span>
     </a>
@@ -892,7 +939,7 @@ async function getAllUsers(db) {
       const raw = await db.get("master_users_list");
       if (raw) {
         const list = JSON.parse(raw);
-        list.forEach(id => MEM_USERS.add(Number(id)));
+        list.forEach((id) => MEM_USERS.add(Number(id)));
       }
     } catch (e) {}
   }
