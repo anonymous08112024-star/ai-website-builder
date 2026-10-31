@@ -36,7 +36,6 @@ export default {
       );
       const tgData = await tgRes.json();
 
-      // Test active Gemini models
       let geminiStatus = "⚠️ Not Tested";
       try {
         const activeModels = await getAvailableFlashModels(geminiKey);
@@ -72,10 +71,7 @@ export default {
           });
         }
 
-        // Clean out injected editor toolbar so saved site is 100% clean
         updatedHtml = updatedHtml.replace(/<!-- START_EDITOR -->[\s\S]*?<!-- END_EDITOR -->/g, "");
-
-        // Ensure branding footer stays present
         updatedHtml = injectBrandingFooter(updatedHtml);
 
         SITE_CACHE.set(slug, updatedHtml);
@@ -105,7 +101,6 @@ export default {
       if (!htmlContent && db && slug) {
         try {
           htmlContent = await db.get(`site_${slug}`);
-          // Brief retry to account for global edge propagation
           if (!htmlContent) {
             await new Promise((r) => setTimeout(r, 600));
             htmlContent = await db.get(`site_${slug}`);
@@ -128,7 +123,6 @@ export default {
         });
       }
 
-      // If site not found, show actionable diagnostic
       const kvWarning = !db
         ? `<div style="margin-top:15px;padding:12px;background:#ef444422;border:1px solid #ef4444;border-radius:10px;font-size:12px;color:#fca5a5;">⚠️ <b>Admin Notice:</b> Cloudflare KV binding <code>BOT_DB</code> is missing. Add it in <b>Worker Settings &rarr; Bindings</b> so websites persist across all devices.</div>`
         : "";
@@ -150,7 +144,6 @@ export default {
       try {
         const update = await request.json();
 
-        // Deduplication to prevent double-clicks & retries
         if (update && update.update_id) {
           if (PROCESSED_UPDATES.has(update.update_id)) {
             return new Response("OK", { status: 200 });
@@ -162,7 +155,6 @@ export default {
           }
         }
 
-        // Return 200 OK to Telegram immediately so it NEVER retries or duplicates
         if (ctx && ctx.waitUntil) {
           ctx.waitUntil(handleUpdate(update, botToken, geminiKey, db, url.origin));
         } else {
@@ -267,8 +259,8 @@ async function handleUpdate(update, botToken, geminiKey, db, originUrl) {
         });
         await tgApi(botToken, "sendMessage", {
           chat_id: chatId,
-          text: "📢 *Admin Broadcast Mode Active*\n\nSend or forward *any message* right now to broadcast it to all bot users!\n\n_Tap Cancel below if you change your mind._",
-          parse_mode: "Markdown",
+          text: "📢 <b>Admin Broadcast Mode Active</b>\n\nSend or forward <b>any message</b> right now to broadcast it to all bot users!\n\n<i>Tap Cancel below if you change your mind.</i>",
+          parse_mode: "HTML",
           reply_markup: {
             inline_keyboard: [[{ text: "❌ Cancel Broadcast", callback_data: "admin_broadcast_cancel" }]]
           }
@@ -285,8 +277,8 @@ async function handleUpdate(update, botToken, geminiKey, db, originUrl) {
         });
         await tgApi(botToken, "sendMessage", {
           chat_id: chatId,
-          text: "✅ *Broadcast Cancelled.*",
-          parse_mode: "Markdown"
+          text: "✅ <b>Broadcast Cancelled.</b>",
+          parse_mode: "HTML"
         });
         return;
       }
@@ -319,8 +311,8 @@ async function handleUpdate(update, botToken, geminiKey, db, originUrl) {
       if (db) await db.put("admin_broadcast_mode", "false");
       await tgApi(botToken, "sendMessage", {
         chat_id: chatId,
-        text: "✅ *Broadcast mode cancelled.*",
-        parse_mode: "Markdown"
+        text: "✅ <b>Broadcast mode cancelled.</b>",
+        parse_mode: "HTML"
       });
       return;
     }
@@ -350,8 +342,8 @@ async function handleUpdate(update, botToken, geminiKey, db, originUrl) {
     const channelHandle = CHANNEL_USERNAME.replace("@", "");
     await tgApi(botToken, "sendMessage", {
       chat_id: chatId,
-      text: `🔒 *Welcome to Instant AI Website Creator!*\n\nTo build and customize free live websites, please join our official hub ${CHANNEL_USERNAME} first:`,
-      parse_mode: "Markdown",
+      text: `🔒 <b>Welcome to Instant AI Website Creator!</b>\n\nTo build and customize free live websites, please join our official hub ${CHANNEL_USERNAME} first:`,
+      parse_mode: "HTML",
       reply_markup: {
         inline_keyboard: [
           [{ text: `📢 Join ${CHANNEL_USERNAME}`, url: `https://t.me/${channelHandle}` }],
@@ -369,7 +361,7 @@ async function handleUpdate(update, botToken, geminiKey, db, originUrl) {
 
   if (!text) return;
 
-  // Check if this is an AI edit request for user's previous website
+  // Check if this is an AI edit request
   const isEditCommand = text.startsWith("/edit ") || (msg.reply_to_message && msg.reply_to_message.text && msg.reply_to_message.text.includes("Live Link:"));
   if (isEditCommand) {
     let editInstructions = text.replace(/^\/edit\s*/i, "").trim();
@@ -390,11 +382,10 @@ async function handleUpdate(update, botToken, geminiKey, db, originUrl) {
     }
   }
 
-  // Generate and Deploy Live Website from Casual Prompt
   await generateAndDeployWebsite(botToken, geminiKey, db, chatId, userId, text, originUrl);
 }
 
-// Welcome Menu with Demo Templates & Feature Overview
+// Welcome Menu with Demo Templates
 async function sendWelcomeMenu(botToken, chatId, userId) {
   const channelHandle = CHANNEL_USERNAME.replace("@", "");
   const keyboard = [
@@ -414,25 +405,23 @@ async function sendWelcomeMenu(botToken, chatId, userId) {
 
   await tgApi(botToken, "sendMessage", {
     chat_id: chatId,
-    text: `🚀 *Instant AI Website Creator & Visual Editor*\n\nDescribe the website you want in casual English or Hindi:\n\n• *Business:* Gym, Cafe, Restaurant, Dental Clinic\n• *Portfolio:* Photography, Freelancer, Coding, Resume\n• *Store / Agency:* Clothing Brand, Real Estate, Consulting\n\n✨ *Key Features:*\n1. 🌐 *Instant Edge Hosting:* Live link deployed on Cloudflare.\n2. ✏️ *Visual Tap-to-Edit:* Tap any headline, price, or text on your phone to customize it, then save live in 1 tap!\n3. 🤖 *AI Revisions:* Reply to any site with changes or type \`/edit make it dark mode\`.\n\n_Example: "Create a modern dark-mode website for a sneaker store named KicksHub in Jaipur with product cards and WhatsApp order button."_\n\n👇 *Send your prompt now or try a demo template below:*`,
-    parse_mode: "Markdown",
+    text: `🚀 <b>Instant AI Website Creator & Visual Editor</b>\n\nDescribe the website you want in casual English or Hindi:\n\n• <b>Business:</b> Gym, Cafe, Restaurant, Dental Clinic\n• <b>Portfolio:</b> Photography, Freelancer, Coding, Resume\n• <b>Store / Agency:</b> Clothing Brand, Real Estate, Consulting\n\n✨ <b>Key Features:</b>\n1. 🌐 <b>Instant Edge Hosting:</b> Live link deployed on Cloudflare.\n2. ✏️ <b>Visual Tap-to-Edit:</b> Tap any headline, price, or text on your phone to customize it, then save live in 1 tap!\n3. 🤖 <b>AI Revisions:</b> Reply to any site with changes or type <code>/edit make it dark mode</code>.\n\n<i>Example: "Create a modern dark-mode website for a sneaker store named KicksHub in Jaipur with product cards and WhatsApp order button."</i>\n\n👇 <b>Send your prompt now or try a demo template below:</b>`,
+    parse_mode: "HTML",
     reply_markup: { inline_keyboard: keyboard }
   });
 }
 
 // Main AI Generation & Deployment Pipeline
 async function generateAndDeployWebsite(botToken, geminiKey, db, chatId, userId, userPrompt, originUrl) {
-  // 1. Initial Animated Progress Tracker Message
   const statusMsg = await tgApi(botToken, "sendMessage", {
     chat_id: chatId,
-    text: `⚡ *Analyzing your prompt...*\n\`[▓░░░░░░░░░] 15%\` Designing layout & color palette...`,
-    parse_mode: "Markdown"
+    text: `⚡ <b>Analyzing prompt...</b>\n<code>[▓░░░░░░░░░] 15%</code> Designing layout & palette...`,
+    parse_mode: "HTML"
   });
 
   const msgId = statusMsg.result?.message_id;
 
   try {
-    // 2. Start Gemini Generation alongside Dynamic Visual Progress Steps
     const aiPromise = generateWebsiteCodeWithGemini(geminiKey, userPrompt);
     const rawHtml = await trackProgress(botToken, chatId, msgId, aiPromise);
 
@@ -440,11 +429,9 @@ async function generateAndDeployWebsite(botToken, geminiKey, db, chatId, userId,
       throw new Error("AI returned empty or invalid HTML. Please try again!");
     }
 
-    // 3. Generate clean slug & embed watermark
     const cleanSlug = generateSlugFromPrompt(userPrompt);
     const finalHtml = injectBrandingFooter(rawHtml);
 
-    // 4. Store permanently in KV database & RAM cache
     SITE_CACHE.set(cleanSlug, finalHtml);
     if (db) {
       try {
@@ -475,46 +462,46 @@ async function generateAndDeployWebsite(botToken, geminiKey, db, chatId, userId,
       ]
     };
 
-    let caption = `🎉 *Your Website is Live & Ready to Customize!*\n\n`;
-    caption += `🔗 *Live Link:* \`${liveUrl}\`\n`;
-    caption += `✏️ *Visual Editor:* [Open Tap-to-Edit Mode](${editUrl})\n\n`;
-    caption += `✨ *Highlights & Features:*\n`;
-    caption += `• *100% Mobile Responsive* with Tailwind CSS\n`;
-    caption += `• *Dynamic Visuals:* Floating gradients, hover lift & glass cards\n`;
-    caption += `• *Interactive WhatsApp CTA:* Floating animated booking button\n`;
-    caption += `• *Visual In-Browser Editor:* Tap any text or price on screen & save live!\n`;
-    caption += `• *AI Revisions:* Reply to this message with \`/edit <changes>\` anytime.\n\n`;
+    let caption = `🎉 <b>Your Website is Live & Ready to Customize!</b>\n\n`;
+    caption += `🔗 <b>Live Link:</b> <a href="${liveUrl}">${liveUrl}</a>\n`;
+    caption += `✏️ <b>Visual Editor:</b> <a href="${editUrl}">Open Tap-to-Edit Mode</a>\n\n`;
+    caption += `✨ <b>Highlights & Features:</b>\n`;
+    caption += `• <b>100% Mobile Responsive</b> with Tailwind CSS\n`;
+    caption += `• <b>Dynamic Visuals:</b> Floating gradients & glass cards\n`;
+    caption += `• <b>Interactive WhatsApp CTA:</b> Floating animated booking button\n`;
+    caption += `• <b>Visual In-Browser Editor:</b> Tap any text on screen & save live!\n`;
+    caption += `• <b>AI Revisions:</b> Reply to this message with <code>/edit &lt;changes&gt;</code> anytime.\n\n`;
 
     if (!db) {
-      caption += `⚠️ *Note:* Cloudflare KV \`BOT_DB\` is not bound yet. Bind it in Cloudflare Settings &rarr; Bindings to keep links permanent!\n\n`;
+      caption += `⚠️ <b>Note:</b> Cloudflare KV <code>BOT_DB</code> is not bound yet. Bind it in Cloudflare Settings &rarr; Bindings to keep links permanent!\n\n`;
     }
 
-    caption += `_Tap "Open Live Website" to view or "Tap-to-Edit on Phone" to customize text!_`;
+    caption += `<i>Tap "Open Live Website" to view or "Tap-to-Edit on Phone" to customize text!</i>`;
 
-    // 5. Seamlessly transform the progress message directly into the finished delivery card!
+    // Seamless transformation into the finished delivery card
     if (msgId) {
       await tgApi(botToken, "editMessageText", {
         chat_id: chatId,
         message_id: msgId,
         text: caption,
-        parse_mode: "Markdown",
+        parse_mode: "HTML",
         reply_markup: actionButtons
       });
     } else {
       await tgApi(botToken, "sendMessage", {
         chat_id: chatId,
         text: caption,
-        parse_mode: "Markdown",
+        parse_mode: "HTML",
         reply_markup: actionButtons
       });
     }
 
-    // 6. Send standalone index.html source code file
+    // Send standalone index.html source code file
     try {
       const form = new FormData();
       form.append("chat_id", String(chatId));
-      form.append("caption", `📄 *index.html* source code for \`${cleanSlug}\`.\nOpen directly in any browser or host on GitHub Pages!`);
-      form.append("parse_mode", "Markdown");
+      form.append("caption", `📄 <b>index.html</b> source code for <code>${cleanSlug}</code>.\nOpen directly in any browser or host on GitHub Pages!`);
+      form.append("parse_mode", "HTML");
       form.append("document", new Blob([finalHtml], { type: "text/html" }), `${cleanSlug}.html`);
 
       await fetch(`https://api.telegram.org/bot${botToken}/sendDocument`, {
@@ -529,8 +516,8 @@ async function generateAndDeployWebsite(botToken, geminiKey, db, chatId, userId,
       await tgApi(botToken, "editMessageText", {
         chat_id: chatId,
         message_id: msgId,
-        text: `⚠️ *Website generation encountered an error:*\n\`${err.message || "Request timed out"}\`\n\nPlease tap a demo button or send your prompt again!`,
-        parse_mode: "Markdown"
+        text: `⚠️ <b>Website generation encountered an error:</b>\n<code>${err.message || "Request timed out"}</code>\n\nPlease tap a demo button or send your prompt again!`,
+        parse_mode: "HTML"
       });
     }
   }
@@ -546,16 +533,16 @@ async function modifyWebsiteWithAI(botToken, geminiKey, db, chatId, userId, slug
   if (!existingHtml) {
     await tgApi(botToken, "sendMessage", {
       chat_id: chatId,
-      text: "⚠️ *Website not found.* Send a new prompt to create one from scratch!",
-      parse_mode: "Markdown"
+      text: "⚠️ <b>Website not found.</b> Send a new prompt to create one from scratch!",
+      parse_mode: "HTML"
     });
     return;
   }
 
   const statusMsg = await tgApi(botToken, "sendMessage", {
     chat_id: chatId,
-    text: `⚡ *Applying your modifications...*\n\`[▓▓▓░░░░░░░] 30%\` Updating design & text with AI...`,
-    parse_mode: "Markdown"
+    text: `⚡ <b>Applying your modifications...</b>\n<code>[▓▓▓░░░░░░░] 30%</code> Updating design & text with AI...`,
+    parse_mode: "HTML"
   });
 
   const msgId = statusMsg.result?.message_id;
@@ -581,14 +568,14 @@ async function modifyWebsiteWithAI(botToken, geminiKey, db, chatId, userId, slug
     const liveUrl = `${originUrl}/site/${slug}`;
     const editUrl = `${originUrl}/site/${slug}?edit=true`;
 
-    const caption = `✅ *Your website has been updated!*\n\n🔗 *Updated Live Link:* \`${liveUrl}\`\n✏️ *Visual Editor:* [Open Tap-to-Edit](${editUrl})\n\n_Your changes are live immediately for all visitors!_`;
+    const caption = `✅ <b>Your website has been updated!</b>\n\n🔗 <b>Updated Live Link:</b> <a href="${liveUrl}">${liveUrl}</a>\n✏️ <b>Visual Editor:</b> <a href="${editUrl}">Open Tap-to-Edit</a>\n\n<i>Your changes are live immediately for all visitors!</i>`;
 
     if (msgId) {
       await tgApi(botToken, "editMessageText", {
         chat_id: chatId,
         message_id: msgId,
         text: caption,
-        parse_mode: "Markdown",
+        parse_mode: "HTML",
         reply_markup: {
           inline_keyboard: [
             [
@@ -604,35 +591,37 @@ async function modifyWebsiteWithAI(botToken, geminiKey, db, chatId, userId, slug
       await tgApi(botToken, "editMessageText", {
         chat_id: chatId,
         message_id: msgId,
-        text: `⚠️ *Edit failed:* ${err.message}`,
-        parse_mode: "Markdown"
+        text: `⚠️ <b>Edit failed:</b> ${err.message}`,
+        parse_mode: "HTML"
       });
     }
   }
 }
 
-// Realistic Dynamic Progress Runner (Never reaches 100% until AI actually completes)
+// Dynamic Progress Steps Runner
 async function trackProgress(botToken, chatId, msgId, promise) {
   if (!msgId) return await promise;
 
   const steps = [
-    { text: `🎨 *Building responsive layout...*\n\`[▓▓▓▓░░░░░░] 45%\` Styling Tailwind components & glass cards...`, ms: 2400 },
-    { text: `📱 *Injecting dynamic visuals...*\n\`[▓▓▓▓▓▓▓░░░] 75%\` Adding hover transitions, pulsing CTA & icons...`, ms: 3000 },
-    { text: `⚡ *Finalizing code architecture...*\n\`[▓▓▓▓▓▓▓▓▓░] 92%\` Optimizing mobile responsiveness...`, ms: 3500 }
+    { text: `🎨 <b>Building responsive layout...</b>\n<code>[▓▓▓▓░░░░░░] 45%</code> Styling Tailwind & glass cards...`, ms: 2000 },
+    { text: `📱 <b>Injecting dynamic visuals...</b>\n<code>[▓▓▓▓▓▓▓░░░] 75%</code> Adding hover transitions & WhatsApp CTA...`, ms: 2500 },
+    { text: `⚡ <b>Finalizing code architecture...</b>\n<code>[▓▓▓▓▓▓▓▓▓░] 90%</code> Preparing mobile responsiveness...`, ms: 3000 }
   ];
 
   let completed = false;
-  const runner = promise.then(res => { completed = true; return res; }).catch(err => { completed = true; throw err; });
+  const runner = promise
+    .then((res) => { completed = true; return res; })
+    .catch((err) => { completed = true; throw err; });
 
   (async () => {
     for (const step of steps) {
-      await new Promise(r => setTimeout(r, step.ms));
+      await new Promise((r) => setTimeout(r, step.ms));
       if (completed) break;
       await tgApi(botToken, "editMessageText", {
         chat_id: chatId,
         message_id: msgId,
         text: step.text,
-        parse_mode: "Markdown"
+        parse_mode: "HTML"
       });
     }
   })();
@@ -640,7 +629,7 @@ async function trackProgress(botToken, chatId, msgId, promise) {
   return await runner;
 }
 
-// Master AI Prompt for Production-Grade HTML5/Tailwind Websites with Dynamic Visuals
+// Master AI Prompt for Production-Grade HTML5/Tailwind Websites
 async function generateWebsiteCodeWithGemini(geminiKey, userPrompt) {
   const systemPrompt = `You are an elite principal web designer and frontend architect.
 The user wants a website described as: "${userPrompt}".
@@ -652,7 +641,7 @@ Technical & Visual Requirements:
 2. Load FontAwesome 6 Icons: <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 3. Choose a sleek, modern palette (e.g. slate-950 with cyan/emerald highlights, warm stone with amber, or deep indigo with violet).
 4. Dynamic Visual Elements:
-   - Floating subtle ambient gradient spheres / mesh background effects (e.g. absolute blur-3xl opacity-20 blobs).
+   - Floating subtle ambient gradient spheres / background glow effects.
    - Glassmorphic card styling (bg-white/5 backdrop-blur-md border border-white/10).
    - Smooth hover transitions (hover:scale-[1.02] hover:shadow-2xl transition-all duration-300).
    - Pulsing fixed WhatsApp floating button at bottom-right (https://wa.me/919876543210?text=Hello%20I%20am%20interested).
@@ -748,7 +737,7 @@ ${existingHtml}`;
   throw new Error(lastError || "Could not modify website");
 }
 
-// Model Fallback Discovery (Cached in RAM so it only runs once)
+// Model Fallback Discovery (Prioritizes 2.0-flash, filters out deprecated 1.5-flash alias)
 async function getAvailableFlashModels(geminiKey) {
   if (CACHED_MODELS && CACHED_MODELS.length > 0) return CACHED_MODELS;
   try {
@@ -764,12 +753,18 @@ async function getAvailableFlashModels(geminiKey) {
             m.supportedGenerationMethods.includes("generateContent") &&
             m.name.includes("gemini") &&
             !m.name.includes("embedding") &&
-            !m.name.includes("imagen")
+            !m.name.includes("imagen") &&
+            m.name !== "models/gemini-1.5-flash" // Exclude deprecated alias on v1beta
         )
         .map((m) => m.name.replace(/^models\//, ""));
 
-      // Sort flash models to the front for fastest generation
-      allModels.sort((a, b) => (b.includes("flash") ? 1 : 0) - (a.includes("flash") ? 1 : 0));
+      allModels.sort((a, b) => {
+        if (a.includes("2.0-flash")) return -1;
+        if (b.includes("2.0-flash")) return 1;
+        if (a.includes("flash")) return -1;
+        if (b.includes("flash")) return 1;
+        return 0;
+      });
 
       if (allModels.length > 0) {
         CACHED_MODELS = allModels;
@@ -779,7 +774,7 @@ async function getAvailableFlashModels(geminiKey) {
   } catch (e) {
     console.error("ListModels discovery failed:", e);
   }
-  return ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-2.0-flash-exp", "gemini-pro"];
+  return ["gemini-2.0-flash", "gemini-2.0-flash-exp", "gemini-1.5-flash-8b", "gemini-pro"];
 }
 
 // Injects Mobile-Friendly Visual Tap-to-Edit Mode & Floating Action Bar
@@ -844,11 +839,9 @@ function injectVisualEditor(html, slug, origin) {
     btn.innerHTML = '⏳ Saving...';
     btn.disabled = true;
 
-    // Clone and remove editable flags before saving
     const clone = document.documentElement.cloneNode(true);
     clone.querySelectorAll('[contenteditable]').forEach(el => el.removeAttribute('contenteditable'));
 
-    // Strip editor bar from clone
     const editorEl = clone.querySelector('#editor-floating-bar');
     if (editorEl) editorEl.remove();
 
@@ -1005,8 +998,8 @@ async function exportUsersFile(botToken, db, adminChatId) {
 
   const form = new FormData();
   form.append("chat_id", String(adminChatId));
-  form.append("caption", `📊 *AI Website Builder — User Database Export*\nTotal Unique Users: ${users.length}\nDate: ${new Date().toISOString().slice(0, 10)}`);
-  form.append("parse_mode", "Markdown");
+  form.append("caption", `📊 <b>AI Website Builder — User Database Export</b>\nTotal Unique Users: ${users.length}\nDate: ${new Date().toISOString().slice(0, 10)}`);
+  form.append("parse_mode", "HTML");
   form.append("document", new Blob([fileContent], { type: "text/plain" }), "users_list.txt");
 
   await fetch(`https://api.telegram.org/bot${botToken}/sendDocument`, {
@@ -1020,8 +1013,8 @@ async function executeBroadcastCopy(botToken, db, adminChatId, messageId) {
   const users = await getAllUsers(db);
   const statusMsg = await tgApi(botToken, "sendMessage", {
     chat_id: adminChatId,
-    text: `⏳ _Broadcasting message to ${users.length} registered users..._`,
-    parse_mode: "Markdown"
+    text: `⏳ <i>Broadcasting message to ${users.length} registered users...</i>`,
+    parse_mode: "HTML"
   });
 
   let sent = 0;
@@ -1050,8 +1043,8 @@ async function executeBroadcastCopy(botToken, db, adminChatId, messageId) {
 
   await tgApi(botToken, "sendMessage", {
     chat_id: adminChatId,
-    text: `✅ *Broadcast Complete!*\n\n• 📬 *Delivered:* ${sent} users\n• 🚫 *Failed / Blocked:* ${failed} users\n• 📊 *Total Target Base:* ${users.length} users`,
-    parse_mode: "Markdown"
+    text: `✅ <b>Broadcast Complete!</b>\n\n• 📬 <b>Delivered:</b> ${sent} users\n• 🚫 <b>Failed / Blocked:</b> ${failed} users\n• 📊 <b>Total Target Base:</b> ${users.length} users`,
+    parse_mode: "HTML"
   });
 }
 
@@ -1065,7 +1058,7 @@ async function executeBroadcastText(botToken, db, adminChatId, text) {
       const res = await tgApi(botToken, "sendMessage", {
         chat_id: uid,
         text: text,
-        parse_mode: "Markdown"
+        parse_mode: "HTML"
       });
       if (res && res.ok) sent++;
       else failed++;
@@ -1076,8 +1069,8 @@ async function executeBroadcastText(botToken, db, adminChatId, text) {
 
   await tgApi(botToken, "sendMessage", {
     chat_id: adminChatId,
-    text: `✅ *Broadcast Complete!*\n\n• 📬 *Delivered:* ${sent} users\n• 🚫 *Failed:* ${failed} users`,
-    parse_mode: "Markdown"
+    text: `✅ <b>Broadcast Complete!</b>\n\n• 📬 <b>Delivered:</b> ${sent} users\n• 🚫 <b>Failed:</b> ${failed} users`,
+    parse_mode: "HTML"
   });
 }
 
@@ -1085,17 +1078,17 @@ async function sendAdminPanel(botToken, db, chatId, editMsgId) {
   const stats = await getStatsData(db);
   const channelMembers = await getChannelMemberCount(botToken);
 
-  let text = `🛠️ *SR Bots Club — Website Creator Admin Panel*\n`;
-  text += `👤 *Admin ID:* \`${ADMIN_ID}\`\n\n`;
-  text += `📊 *Detailed Live Statistics:*\n`;
-  text += `• 👥 *Total Unique Bot Users:* ${stats.userCount}\n`;
+  let text = `🛠️ <b>SR Bots Club — Website Creator Admin Panel</b>\n`;
+  text += `👤 <b>Admin ID:</b> <code>${ADMIN_ID}</code>\n\n`;
+  text += `📊 <b>Detailed Live Statistics:</b>\n`;
+  text += `• 👥 <b>Total Unique Bot Users:</b> ${stats.userCount}\n`;
   if (channelMembers) {
-    text += `• 📢 *${CHANNEL_USERNAME} Subscribers:* ${channelMembers}\n`;
+    text += `• 📢 <b>${CHANNEL_USERNAME} Subscribers:</b> ${channelMembers}\n`;
   }
-  text += `• 🌐 *Total Websites Created & Hosted:* ${stats.sites}\n`;
-  text += `• ✏️ *Total Website Customizations & Edits:* ${stats.edits}\n`;
-  text += `• 💾 *Storage Engine:* ${db ? "Permanent Cloudflare KV (`BOT_DB`)" : "⚠️ RAM Mode"}\n\n`;
-  text += `_Tap a button below to broadcast an announcement, export your user list, or refresh stats:_`;
+  text += `• 🌐 <b>Total Websites Created & Hosted:</b> ${stats.sites}\n`;
+  text += `• ✏️ <b>Total Website Customizations & Edits:</b> ${stats.edits}\n`;
+  text += `• 💾 <b>Storage Engine:</b> ${db ? "Permanent Cloudflare KV (<code>BOT_DB</code>)" : "⚠️ RAM Mode"}\n\n`;
+  text += `<i>Tap a button below to broadcast an announcement, export your user list, or refresh stats:</i>`;
 
   const reply_markup = {
     inline_keyboard: [
@@ -1112,24 +1105,41 @@ async function sendAdminPanel(botToken, db, chatId, editMsgId) {
       chat_id: chatId,
       message_id: editMsgId,
       text: text,
-      parse_mode: "Markdown",
+      parse_mode: "HTML",
       reply_markup: reply_markup
     });
   } else {
     await tgApi(botToken, "sendMessage", {
       chat_id: chatId,
       text: text,
-      parse_mode: "Markdown",
+      parse_mode: "HTML",
       reply_markup: reply_markup
     });
   }
 }
 
 async function tgApi(botToken, method, payload) {
-  const res = await fetch(`https://api.telegram.org/bot${botToken}/${method}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload)
-  });
-  return await res.json();
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${botToken}/${method}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (!data.ok && payload.parse_mode) {
+      console.warn(`Telegram ${method} failed with parse_mode, retrying as plain text:`, data.description);
+      const fallbackPayload = { ...payload };
+      delete fallbackPayload.parse_mode;
+      const res2 = await fetch(`https://api.telegram.org/bot${botToken}/${method}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(fallbackPayload)
+      });
+      return await res2.json();
+    }
+    return data;
+  } catch (err) {
+    console.error(`Network error calling Telegram ${method}:`, err);
+    return { ok: false, error: err.message };
+  }
 }
