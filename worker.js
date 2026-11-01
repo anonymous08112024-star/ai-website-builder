@@ -416,6 +416,84 @@ async function handleUpdate(update, botToken, geminiKey, db, originUrl) {
 
   if (!text) return;
 
+  // Instant WhatsApp Number Update (/whatsapp 919876543210)
+  if (text.startsWith("/whatsapp") || text.startsWith("/phone")) {
+    const rawNum = text.replace(/^\/(whatsapp|phone)\s*/i, "").trim();
+    const cleanNum = rawNum.replace(/[^0-9]/g, "");
+    if (!cleanNum || cleanNum.length < 10) {
+      await tgApi(botToken, "sendMessage", {
+        chat_id: chatId,
+        text: "📱 <b>How to set your WhatsApp number:</b>\n\nSend: <code>/whatsapp 919876543210</code>\n<i>(Include your country code, e.g. 91 for India)</i>",
+        parse_mode: "HTML"
+      });
+      return;
+    }
+
+    let targetSlug = null;
+    if (msg.reply_to_message && msg.reply_to_message.text) {
+      const match = msg.reply_to_message.text.match(/\/site\/([a-z0-9\-]+)/i);
+      if (match) targetSlug = match[1].toLowerCase();
+    }
+    if (!targetSlug && db) {
+      targetSlug = await db.get(`u_last_site_${userId}`);
+    }
+
+    if (!targetSlug) {
+      await tgApi(botToken, "sendMessage", {
+        chat_id: chatId,
+        text: "⚠️ <b>No website found to update.</b>\nPlease create a website first by sending your description!",
+        parse_mode: "HTML"
+      });
+      return;
+    }
+
+    let existingHtml = SITE_CACHE.get(targetSlug);
+    if (!existingHtml && db) {
+      existingHtml = await db.get(`site_${targetSlug}`);
+    }
+
+    if (!existingHtml) {
+      await tgApi(botToken, "sendMessage", {
+        chat_id: chatId,
+        text: "⚠️ <b>Website not found.</b>",
+        parse_mode: "HTML"
+      });
+      return;
+    }
+
+    // Instantly replace all WhatsApp links across the entire HTML
+    const updatedHtml = existingHtml.replace(
+      /https:\/\/(wa\.me|api\.whatsapp\.com\/send\?phone=)[^"'\s>]+/g,
+      `https://wa.me/${cleanNum}?text=Hello%20I%20am%20interested`
+    );
+
+    SITE_CACHE.set(targetSlug, updatedHtml);
+    if (db) {
+      try {
+        await db.put(`site_${targetSlug}`, updatedHtml);
+      } catch (_) {}
+    }
+
+    const cacheBuster = Date.now().toString().slice(-4);
+    const liveUrl = `${originUrl}/site/${targetSlug}?v=${cacheBuster}`;
+    const editUrl = `${originUrl}/site/${targetSlug}?edit=true&v=${cacheBuster}`;
+
+    await tgApi(botToken, "sendMessage", {
+      chat_id: chatId,
+      text: `✅ <b>WhatsApp Number Updated Instantly!</b>\n\nAll booking and chat buttons now direct to: <code>+${cleanNum}</code>\n\n🔗 <b>Live Link:</b> <a href="${liveUrl}">${liveUrl}</a>\n✏️ <b>Visual Editor:</b> <a href="${editUrl}">Open Tap-to-Edit</a>`,
+      parse_mode: "HTML",
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: "🌐 Open Live Website", url: liveUrl },
+            { text: "✏️ Tap-to-Edit on Phone", url: editUrl }
+          ]
+        ]
+      }
+    });
+    return;
+  }
+
   // Check if this is an AI edit request
   const isEditCommand = text.startsWith("/edit") || (msg.reply_to_message && msg.reply_to_message.text && msg.reply_to_message.text.includes("Live Link:"));
   if (isEditCommand) {
@@ -654,6 +732,118 @@ async function modifyWebsiteWithAI(botToken, geminiKey, db, chatId, userId, slug
 }
 
 // Master AI Prompt for Production-Grade HTML5/Tailwind Websites
+// Universal Fast Gemini Engine with Zero-Thinking-Delay & Model Failover
+async function callGeminiApiFast(geminiKey, prompt, db) {
+  let activeModel = WORKING_MODEL;
+  if (!activeModel && db) {
+    try {
+      activeModel = await db.get("working_model");
+      if (activeModel) WORKING_MODEL = activeModel;
+    } catch (_) {}
+  }
+
+  // Build candidate priority queue
+  const queue = [];
+  if (activeModel && FAST_CANDIDATE_MODELS.includes(activeModel)) {
+    queue.push(activeModel);
+  }
+  for (const m of FAST_CANDIDATE_MODELS) {
+    if (!queue.includes(m)) queue.push(m);
+  }
+
+  // 26s timeout guardrail (safe margin within Cloudflare's 30s ceiling)
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 26000);
+
+  let lastError = null;
+
+  try {
+    for (const model of queue) {
+      try {
+        // Essential: Disable dynamic thinking on Gemini 2.5 / set minimal on 3.x
+        // This drops generation time from 28s+ down to ~3-5 seconds!
+        let genConfig = {
+          temperature: 0.3,
+          maxOutputTokens: 4096
+        };
+
+        if (model.includes("2.5")) {
+          genConfig.thinkingConfig = { thinkingBudget: 0 };
+        } else if (model.includes("flash-lite") || model.includes("3.1") || model.includes("3.5")) {
+          genConfig.thinkingConfig = { thinkingLevel: "minimal" };
+        } else {
+          genConfig.thinkingConfig = { thinkingLevel: "low" };
+        }
+
+        let res = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            signal: controller.signal,
+            body: JSON.stringify({
+              contents: [{ parts: [{ text: prompt }] }],
+              generationConfig: genConfig
+            })
+          }
+        );
+
+        // If thinkingConfig is rejected with 400 on any model, retry immediately without it
+        if (res.status === 400) {
+          const errBody = await res.json().catch(() => ({}));
+          const errMsg = JSON.stringify(errBody);
+          if (errMsg.includes("thinkingConfig") || errMsg.includes("thinkingBudget") || errMsg.includes("thinkingLevel")) {
+            delete genConfig.thinkingConfig;
+            res = await fetch(
+              `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                signal: controller.signal,
+                body: JSON.stringify({
+                  contents: [{ parts: [{ text: prompt }] }],
+                  generationConfig: genConfig
+                })
+              }
+            );
+          }
+        }
+
+        if (res.ok) {
+          const data = await res.json();
+          let text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+          text = text.replace(/^```html\s*/i, "").replace(/```\s*$/i, "").trim();
+
+          if (text.includes("<html") || text.includes("<!DOCTYPE") || text.includes("<body")) {
+            clearTimeout(timeoutId);
+            WORKING_MODEL = model;
+            if (db) {
+              try { await db.put("working_model", model); } catch (_) {}
+            }
+            return text;
+          }
+        } else {
+          const errData = await res.json().catch(() => ({}));
+          lastError = new Error(errData.error?.message || `HTTP ${res.status} from ${model}`);
+        }
+      } catch (innerErr) {
+        if (innerErr.name === "AbortError") throw innerErr;
+        lastError = innerErr;
+      }
+    }
+  } catch (outerErr) {
+    clearTimeout(timeoutId);
+    if (outerErr.name === "AbortError") {
+      throw new Error("AI generation timed out after 26s. Please try again!");
+    }
+    throw outerErr;
+  }
+
+  clearTimeout(timeoutId);
+  throw lastError || new Error("Failed to generate content from AI models.");
+}
+
+// Master AI Prompt for Production-Grade HTML5/Tailwind Websites
 async function generateWebsiteCodeWithGemini(geminiKey, userPrompt, db) {
   const systemPrompt = `You are an elite principal web designer and frontend architect.
 The user wants a website described as: "${userPrompt}".
@@ -665,7 +855,7 @@ Requirements:
 2. Load FontAwesome 6 Icons: <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 3. Choose a sleek, modern palette (e.g. slate-950/cyan for tech/gym, warm stone/amber for cafes, indigo/gold for luxury).
 4. Include rich realistic sections:
-   - Modern Sticky Navbar: brand name, desktop links, mobile hamburger button (<button id="mobile-menu-btn" class="md:hidden"><i class="fa-solid fa-bars"></i></button>), and mobile drawer (<div id="mobile-menu" class="hidden md:hidden">...links...</div>).
+   - Modern Sticky Navbar: brand name, desktop links, mobile hamburger button (<button id="mobile-menu-btn" class="md:hidden text-2xl p-2 focus:outline-none"><i class="fa-solid fa-bars"></i></button>), and mobile drawer (<div id="mobile-menu" class="hidden md:hidden flex flex-col space-y-3 p-4 bg-slate-900 border-b border-slate-800">...links...</div>).
    - Hero Section with bold typography, badges, and primary/secondary CTA buttons
    - Features / Services Grid with high-contrast cards
    - Pricing or Menu or Showcase Cards with realistic items and highlights
@@ -673,58 +863,18 @@ Requirements:
    - Interactive FAQ Section with vanilla JS toggle
    - Direct WhatsApp / Contact button: href="https://wa.me/919876543210?text=Hello%20I%20am%20interested"
    - Polished Footer
-5. Make it concise and clean. Return ONLY valid raw HTML code without markdown code fences, no backticks, no conversational commentary.`;
+5. Make it concise and clean. Return ONLY valid raw HTML code starting with <!DOCTYPE html> and ending with </html>. No markdown code fences, no backticks, no conversational commentary.`;
 
-  const model = await getWorkingModel(geminiKey, db);
-
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 25000);
-
-  try {
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        signal: controller.signal,
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: systemPrompt }] }],
-          generationConfig: {
-            temperature: 0.3,
-            maxOutputTokens: 4096
-          }
-        })
-      }
-    );
-
-    clearTimeout(timeoutId);
-
-    if (!res.ok) {
-      const errJson = await res.json().catch(() => ({}));
-      throw new Error(errJson.error?.message || `HTTP ${res.status} (${model})`);
-    }
-
-    const data = await res.json();
-    let text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-    text = text.replace(/^```html\s*/i, "").replace(/```\s*$/i, "").trim();
-    if (text.includes("<html") || text.includes("<!DOCTYPE")) {
-      return text;
-    }
-  } catch (e) {
-    clearTimeout(timeoutId);
-    throw new Error(e.name === "AbortError" ? "AI generation timed out after 25s" : e.message);
-  }
-
-  throw new Error("Could not generate valid HTML");
+  return await callGeminiApiFast(geminiKey, systemPrompt, db);
 }
 
-// AI Modification Prompt
+// AI Modification Engine for Existing Websites
 async function refineWebsiteWithGemini(geminiKey, existingHtml, editInstructions, db) {
   const prompt = `You are an elite web developer.
 Modify the following existing website HTML based on this user instruction: "${editInstructions}".
 
 Strict Editing Instructions:
-1. Carefully apply all content and location updates requested by the user. For example, if asked to change location, city, business name, phone number, or prices: find and replace ALL occurrences throughout the entire page (navbar, hero headline, description, address, map placeholder, testimonials, contact section, footer).
+1. Carefully apply all content and location updates requested by the user. For example, if asked to change location, city, business name, phone number, or prices: find and replace ALL occurrences throughout the entire page (navbar brand, hero headline, description, address, map card, testimonials, contact section, footer). Do not leave the old location or name anywhere!
 2. Retain the existing layout structure, Tailwind CSS styling, FontAwesome icons, and scripts unless specifically asked to change them.
 3. Return ONLY the complete, updated raw HTML code starting with <!DOCTYPE html> and ending with </html>.
 4. No markdown fences, no backticks, no explanatory comments.
@@ -732,93 +882,9 @@ Strict Editing Instructions:
 Existing HTML Code:
 ${existingHtml}`;
 
-  const model = await getWorkingModel(geminiKey, db);
-
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 25000);
-
-  try {
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        signal: controller.signal,
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: {
-            temperature: 0.2,
-            maxOutputTokens: 4096
-          }
-        })
-      }
-    );
-
-    clearTimeout(timeoutId);
-
-    if (!res.ok) {
-      const errJson = await res.json().catch(() => ({}));
-      throw new Error(errJson.error?.message || `HTTP ${res.status} (${model})`);
-    }
-
-    const data = await res.json();
-    let text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-    text = text.replace(/^```html\s*/i, "").replace(/```\s*$/i, "").trim();
-    if (text.includes("<html") || text.includes("<!DOCTYPE")) {
-      return text;
-    }
-  } catch (e) {
-    clearTimeout(timeoutId);
-    throw new Error(e.name === "AbortError" ? "AI modification timed out after 25s" : e.message);
-  }
-
-  throw new Error("Could not modify website");
+  return await callGeminiApiFast(geminiKey, prompt, db);
 }
 
-// Fast retrieval of verified working model from RAM or KV
-async function getWorkingModel(geminiKey, db) {
-  if (WORKING_MODEL) return WORKING_MODEL;
-
-  if (db) {
-    try {
-      const stored = await db.get("working_model");
-      if (stored) {
-        WORKING_MODEL = stored;
-        return stored;
-      }
-    } catch (_) {}
-  }
-
-  try {
-    const modelsRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${geminiKey}`);
-    const data = await modelsRes.json();
-    if (data.models) {
-      const valid = data.models
-        .filter(m => m.supportedGenerationMethods && m.supportedGenerationMethods.includes("generateContent"))
-        .map(m => m.name.replace(/^models\//, ""))
-        .filter(m => !m.includes("tts") && !m.includes("embedding") && !m.includes("imagen"));
-
-      for (const m of valid) {
-        try {
-          const test = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${geminiKey}`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ contents: [{ parts: [{ text: "hi" }] }] })
-          });
-          if (test.ok) {
-            WORKING_MODEL = m;
-            if (db) await db.put("working_model", m);
-            return m;
-          }
-        } catch (_) {}
-      }
-    }
-  } catch (_) {}
-
-  return "gemini-2.0-flash";
-}
-
-// Injects Universal Mobile Drawer Menu & Accordion Helper
 function injectUniversalScripts(html) {
   if (html.includes("id=\"sr-universal-mobile-menu\"")) return html;
 
@@ -826,47 +892,64 @@ function injectUniversalScripts(html) {
 <script id="sr-universal-mobile-menu">
 (function() {
   function initMobileMenu() {
-    const btn = document.getElementById('mobile-menu-btn') ||
-                document.getElementById('menu-btn') ||
-                document.querySelector('nav button:has(.fa-bars)') ||
-                document.querySelector('nav button:has(svg)');
+    var btn = document.getElementById('mobile-menu-btn') ||
+              document.getElementById('menu-btn') ||
+              document.querySelector('button[aria-label*="menu" i]');
 
-    const menu = document.getElementById('mobile-menu') ||
-                 document.getElementById('mobile-nav') ||
-                 document.querySelector('nav div.md\\:hidden') ||
-                 document.querySelector('nav ul.md\\:hidden');
+    if (!btn) {
+      var allBtns = document.querySelectorAll('nav button, header button');
+      for (var i = 0; i < allBtns.length; i++) {
+        if (allBtns[i].querySelector('.fa-bars, .fa-navicon, svg, [class*="bar"], [class*="menu"]')) {
+          btn = allBtns[i];
+          break;
+        }
+      }
+    }
+
+    var menu = document.getElementById('mobile-menu') ||
+               document.getElementById('mobile-nav') ||
+               document.querySelector('nav div.md\:hidden') ||
+               document.querySelector('nav ul.md\:hidden');
 
     if (btn && menu) {
       btn.style.cursor = 'pointer';
-      btn.addEventListener('click', function(e) {
+      btn.onclick = function(e) {
         e.stopPropagation();
-        if (menu.classList.contains('hidden')) {
+        if (menu.classList.contains('hidden') || menu.style.display === 'none') {
           menu.classList.remove('hidden');
           menu.style.display = 'block';
         } else {
           menu.classList.add('hidden');
           menu.style.display = 'none';
         }
-      });
+      };
 
-      menu.querySelectorAll('a').forEach(link => {
-        link.addEventListener('click', function() {
+      var links = menu.querySelectorAll('a');
+      for (var j = 0; j < links.length; j++) {
+        links[j].onclick = function() {
           menu.classList.add('hidden');
           menu.style.display = 'none';
-        });
-      });
+        };
+      }
     }
 
     // Interactive FAQ Accordions
-    document.querySelectorAll('[data-faq-question], .faq-item h3, .faq-item button').forEach(q => {
-      q.style.cursor = 'pointer';
-      q.addEventListener('click', function() {
-        const answer = this.nextElementSibling || this.parentElement.querySelector('p');
-        if (answer) {
-          answer.classList.toggle('hidden');
+    var faqQuestions = document.querySelectorAll('[data-faq-question], .faq-item h3, .faq-item button, [class*="faq"] button');
+    for (var k = 0; k < faqQuestions.length; k++) {
+      faqQuestions[k].style.cursor = 'pointer';
+      faqQuestions[k].onclick = function() {
+        var ans = this.nextElementSibling || (this.parentElement ? this.parentElement.querySelector('p, div') : null);
+        if (ans) {
+          if (ans.classList.contains('hidden') || ans.style.display === 'none') {
+            ans.classList.remove('hidden');
+            ans.style.display = 'block';
+          } else {
+            ans.classList.add('hidden');
+            ans.style.display = 'none';
+          }
         }
-      });
-    });
+      };
+    }
   }
 
   if (document.readyState === 'loading') {
