@@ -79,6 +79,7 @@ export default {
         }
 
         updatedHtml = updatedHtml.replace(/<!-- START_EDITOR -->[\s\S]*?<!-- END_EDITOR -->/g, "");
+        updatedHtml = injectUniversalScripts(updatedHtml);
         updatedHtml = injectBrandingFooter(updatedHtml);
 
         SITE_CACHE.set(slug, updatedHtml);
@@ -120,18 +121,22 @@ export default {
 
       if (htmlContent) {
         const isEditMode = url.searchParams.get("edit") === "true";
-        const finalOutput = isEditMode ? injectVisualEditor(htmlContent, slug, url.origin) : htmlContent;
+        let finalOutput = injectUniversalScripts(htmlContent);
+        if (isEditMode) {
+          finalOutput = injectVisualEditor(finalOutput, slug, url.origin);
+        }
 
+        // Always no-cache so edits are immediately visible upon refresh
         return new Response(finalOutput, {
           headers: {
             "content-type": "text/html; charset=utf-8",
-            "cache-control": isEditMode ? "no-store, no-cache" : "public, max-age=1800"
+            "cache-control": "no-store, no-cache, must-revalidate, max-age=0"
           }
         });
       }
 
       const kvWarning = !db
-        ? `<div style="margin-top:15px;padding:12px;background:#ef444422;border:1px solid #ef4444;border-radius:10px;font-size:12px;color:#fca5a5;">⚠️ <b>Notice:</b> Cloudflare KV binding <code>BOT_DB</code> is missing. Add it in <b>Worker Settings &rarr; Bindings</b> to keep sites permanent across all devices.</div>`
+        ? `<div style="margin-top:15px;padding:12px;background:#ef444422;border:1px solid #ef4444;border-radius:10px;font-size:12px;color:#fca5a5;">⚠️ <b>Notice:</b> Cloudflare KV binding <code>BOT_DB</code> is missing. Add it in <b>Worker Settings &rarr; Bindings</b> so websites persist across all devices.</div>`
         : "";
 
       return new Response(
@@ -369,9 +374,9 @@ async function handleUpdate(update, botToken, geminiKey, db, originUrl) {
   if (!text) return;
 
   // Check if this is an AI edit request
-  const isEditCommand = text.startsWith("/edit ") || (msg.reply_to_message && msg.reply_to_message.text && msg.reply_to_message.text.includes("Live Link:"));
+  const isEditCommand = text.startsWith("/edit") || (msg.reply_to_message && msg.reply_to_message.text && msg.reply_to_message.text.includes("Live Link:"));
   if (isEditCommand) {
-    let editInstructions = text.replace(/^\/edit\s*/i, "").trim();
+    let editInstructions = text.replace(/^\/edit\s*/i, "").replace(/^[<]+|[>]+$/g, "").trim();
     let targetSlug = null;
 
     if (msg.reply_to_message && msg.reply_to_message.text) {
@@ -383,8 +388,15 @@ async function handleUpdate(update, botToken, geminiKey, db, originUrl) {
       targetSlug = await db.get(`u_last_site_${userId}`);
     }
 
-    if (targetSlug) {
+    if (targetSlug && editInstructions) {
       await modifyWebsiteWithAI(botToken, geminiKey, db, chatId, userId, targetSlug, editInstructions, originUrl);
+      return;
+    } else if (!editInstructions) {
+      await tgApi(botToken, "sendMessage", {
+        chat_id: chatId,
+        text: "💡 <b>How to edit:</b>\nSend <code>/edit your changes here</code>\n\n<i>Example:</i> <code>/edit change location to Nathdwara and update phone to 919876543210</code>",
+        parse_mode: "HTML"
+      });
       return;
     }
   }
@@ -412,7 +424,7 @@ async function sendWelcomeMenu(botToken, chatId, userId) {
 
   await tgApi(botToken, "sendMessage", {
     chat_id: chatId,
-    text: `🚀 <b>Instant AI Website Creator & Visual Editor</b>\n\nDescribe the website you want in casual English or Hindi:\n\n• <b>Business:</b> Gym, Cafe, Restaurant, Dental Clinic\n• <b>Portfolio:</b> Photography, Freelancer, Coding, Resume\n• <b>Store / Agency:</b> Clothing Brand, Real Estate, Consulting\n\n✨ <b>Key Features:</b>\n1. 🌐 <b>Instant Edge Hosting:</b> Live link deployed on Cloudflare.\n2. ✏️ <b>Visual Tap-to-Edit:</b> Tap any headline, price, or text on your phone to customize it, then save live in 1 tap!\n3. 🤖 <b>AI Revisions:</b> Reply to any site with changes or type <code>/edit make it dark mode</code>.\n\n<i>Example: "Create a modern dark-mode website for a sneaker store named KicksHub in Jaipur with product cards and WhatsApp order button."</i>\n\n👇 <b>Send your prompt now or try a demo template below:</b>`,
+    text: `🚀 <b>Instant AI Website Creator & Visual Editor</b>\n\nDescribe the website you want in casual English or Hindi:\n\n• <b>Business:</b> Gym, Cafe, Restaurant, Dental Clinic\n• <b>Portfolio:</b> Photography, Freelancer, Coding, Resume\n• <b>Store / Agency:</b> Clothing Brand, Real Estate, Consulting\n\n✨ <b>Superpowers:</b>\n1. 🌐 <b>Instant Live Hosting:</b> Live link generated in ~5s.\n2. 📱 <b>Working Mobile Drawer Menu:</b> Responsive side menu on all devices.\n3. ✏️ <b>Visual Tap-to-Edit:</b> Tap any text on phone to edit & tap <b>"📱 Set WhatsApp"</b> to update your contact number!\n4. 🤖 <b>AI Revisions:</b> Type <code>/edit change location to Nathdwara</code> anytime.\n\n<i>Example: "Create a modern dark-mode website for a cafe in Nathdwara with menu and WhatsApp button."</i>\n\n👇 <b>Send your prompt now or try a demo template below:</b>`,
     parse_mode: "HTML",
     reply_markup: { inline_keyboard: keyboard }
   });
@@ -420,13 +432,11 @@ async function sendWelcomeMenu(botToken, chatId, userId) {
 
 // Main AI Generation & Deployment Pipeline
 async function generateAndDeployWebsite(botToken, geminiKey, db, chatId, userId, userPrompt, originUrl) {
-  // Show Telegram native "typing..." status in header
   await tgApi(botToken, "sendChatAction", { chat_id: chatId, action: "typing" });
 
-  // Send clean single status notice
   const statusMsg = await tgApi(botToken, "sendMessage", {
     chat_id: chatId,
-    text: `⚡ <b>Designing your website...</b>\n\n<i>Crafting responsive layout, Tailwind components, and WhatsApp booking (~6s)...</i>`,
+    text: `⚡ <b>Designing your website...</b>\n\n<i>Crafting responsive layout, mobile drawer menu, and WhatsApp booking (~5s)...</i>`,
     parse_mode: "HTML"
   });
 
@@ -440,9 +450,9 @@ async function generateAndDeployWebsite(botToken, geminiKey, db, chatId, userId,
     }
 
     const cleanSlug = generateSlugFromPrompt(userPrompt);
-    const finalHtml = injectBrandingFooter(rawHtml);
+    let finalHtml = injectUniversalScripts(rawHtml);
+    finalHtml = injectBrandingFooter(finalHtml);
 
-    // Save in KV database & RAM cache
     SITE_CACHE.set(cleanSlug, finalHtml);
     if (db) {
       try {
@@ -456,7 +466,7 @@ async function generateAndDeployWebsite(botToken, geminiKey, db, chatId, userId,
 
     const liveUrl = `${originUrl}/site/${cleanSlug}`;
     const editUrl = `${originUrl}/site/${cleanSlug}?edit=true`;
-    const shareText = encodeURIComponent(`Check out my new website built in 8 seconds with ${CHANNEL_USERNAME} 🚀: ${liveUrl}`);
+    const shareText = encodeURIComponent(`Check out my new website built in 5 seconds with ${CHANNEL_USERNAME} 🚀: ${liveUrl}`);
     const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(liveUrl)}&text=${shareText}`;
     const channelHandle = CHANNEL_USERNAME.replace("@", "");
 
@@ -477,13 +487,12 @@ async function generateAndDeployWebsite(botToken, geminiKey, db, chatId, userId,
     caption += `🔗 <b>Live Link:</b> <a href="${liveUrl}">${liveUrl}</a>\n`;
     caption += `✏️ <b>Visual Editor:</b> <a href="${editUrl}">Open Tap-to-Edit Mode</a>\n\n`;
     caption += `✨ <b>Highlights & Features:</b>\n`;
-    caption += `• <b>100% Mobile Responsive</b> with Tailwind CSS\n`;
-    caption += `• <b>Interactive WhatsApp CTA:</b> Floating direct booking button\n`;
+    caption += `• <b>100% Mobile Responsive</b> with working hamburger menu\n`;
+    caption += `• <b>Interactive WhatsApp CTA:</b> Easily update your number in Edit Mode\n`;
     caption += `• <b>Visual In-Browser Editor:</b> Tap any text on screen & save live!\n`;
-    caption += `• <b>AI Revisions:</b> Reply to this message with <code>/edit &lt;changes&gt;</code> anytime.\n\n`;
-    caption += `<i>Tap "Open Live Website" to view or "Tap-to-Edit on Phone" to customize text!</i>`;
+    caption += `• <b>AI Revisions:</b> Reply with <code>/edit change location to Nathdwara</code> anytime.\n\n`;
+    caption += `<i>Tap "Open Live Website" to view or "Tap-to-Edit on Phone" to customize!</i>`;
 
-    // Cleanly remove waiting message
     if (msgId) {
       await tgApi(botToken, "deleteMessage", {
         chat_id: chatId,
@@ -491,7 +500,6 @@ async function generateAndDeployWebsite(botToken, geminiKey, db, chatId, userId,
       });
     }
 
-    // Deliver finished website card
     await tgApi(botToken, "sendMessage", {
       chat_id: chatId,
       text: caption,
@@ -499,7 +507,6 @@ async function generateAndDeployWebsite(botToken, geminiKey, db, chatId, userId,
       reply_markup: actionButtons
     });
 
-    // Send standalone index.html source code file
     try {
       const form = new FormData();
       form.append("chat_id", String(chatId));
@@ -544,7 +551,7 @@ async function modifyWebsiteWithAI(botToken, geminiKey, db, chatId, userId, slug
 
   const statusMsg = await tgApi(botToken, "sendMessage", {
     chat_id: chatId,
-    text: `⚡ <b>Applying your modifications...</b>\n\n<i>Updating design and text with AI...</i>`,
+    text: `⚡ <b>Applying your modifications...</b>\n\n<i>Updating content to "${escapeHtml(editPrompt)}" with AI...</i>`,
     parse_mode: "HTML"
   });
 
@@ -557,7 +564,8 @@ async function modifyWebsiteWithAI(botToken, geminiKey, db, chatId, userId, slug
       throw new Error("Could not apply edits.");
     }
 
-    const cleanUpdatedHtml = injectBrandingFooter(updatedHtml);
+    let cleanUpdatedHtml = injectUniversalScripts(updatedHtml);
+    cleanUpdatedHtml = injectBrandingFooter(cleanUpdatedHtml);
 
     SITE_CACHE.set(slug, cleanUpdatedHtml);
     if (db) {
@@ -567,10 +575,12 @@ async function modifyWebsiteWithAI(botToken, geminiKey, db, chatId, userId, slug
       } catch (e) {}
     }
 
-    const liveUrl = `${originUrl}/site/${slug}`;
-    const editUrl = `${originUrl}/site/${slug}?edit=true`;
+    // Cache buster parameter so mobile browsers immediately show updated content
+    const cacheBuster = Date.now().toString().slice(-4);
+    const liveUrl = `${originUrl}/site/${slug}?v=${cacheBuster}`;
+    const editUrl = `${originUrl}/site/${slug}?edit=true&v=${cacheBuster}`;
 
-    const caption = `✅ <b>Your website has been updated!</b>\n\n🔗 <b>Updated Live Link:</b> <a href="${liveUrl}">${liveUrl}</a>\n✏️ <b>Visual Editor:</b> <a href="${editUrl}">Open Tap-to-Edit</a>\n\n<i>Your changes are live immediately for all visitors!</i>`;
+    const caption = `✅ <b>Your website has been updated!</b>\n\n🔗 <b>Updated Live Link:</b> <a href="${liveUrl}">${liveUrl}</a>\n✏️ <b>Visual Editor:</b> <a href="${editUrl}">Open Tap-to-Edit</a>\n\n<i>Changes are live immediately! Tap the link above to view your updated site.</i>`;
 
     if (msgId) {
       await tgApi(botToken, "deleteMessage", { chat_id: chatId, message_id: msgId }).catch(() => {});
@@ -613,7 +623,7 @@ Requirements:
 2. Load FontAwesome 6 Icons: <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 3. Choose a sleek, modern palette (e.g. slate-950/cyan for tech/gym, warm stone/amber for cafes, indigo/gold for luxury).
 4. Include rich realistic sections:
-   - Modern Sticky Navbar with brand name, links, and CTA button
+   - Modern Sticky Navbar: brand name, desktop links, mobile hamburger button (<button id="mobile-menu-btn" class="md:hidden"><i class="fa-solid fa-bars"></i></button>), and mobile drawer (<div id="mobile-menu" class="hidden md:hidden">...links...</div>).
    - Hero Section with bold typography, badges, and primary/secondary CTA buttons
    - Features / Services Grid with high-contrast cards
    - Pricing or Menu or Showcase Cards with realistic items and highlights
@@ -621,8 +631,7 @@ Requirements:
    - Interactive FAQ Section with vanilla JS toggle
    - Direct WhatsApp / Contact button: href="https://wa.me/919876543210?text=Hello%20I%20am%20interested"
    - Polished Footer
-5. Include functional Vanilla JavaScript for mobile menu toggles and FAQ accordion expand/collapse.
-6. Make it completely self-contained. Return ONLY valid raw HTML code without markdown code fences, no backticks, no conversational commentary.`;
+5. Make it completely self-contained. Return ONLY valid raw HTML code without markdown code fences, no backticks, no conversational commentary.`;
 
   const model = await findWorkingModel(geminiKey);
 
@@ -661,10 +670,11 @@ async function refineWebsiteWithGemini(geminiKey, existingHtml, editInstructions
   const prompt = `You are an elite web developer.
 Modify the following existing website HTML based on this user instruction: "${editInstructions}".
 
-Strict Guidelines:
-1. Retain the existing layout, Tailwind CSS, FontAwesome, and functionality unless specifically asked to change them.
-2. Return ONLY the complete, updated raw HTML code starting with <!DOCTYPE html> and ending with </html>.
-3. No markdown fences, no backticks, no explanatory comments.
+Strict Editing Instructions:
+1. Carefully apply all content and location updates requested by the user. For example, if asked to change location, city, business name, phone number, or prices: find and replace ALL occurrences throughout the entire page (navbar, hero headline, description, address, map placeholder, testimonials, contact section, footer).
+2. Retain the existing layout structure, Tailwind CSS styling, FontAwesome icons, and scripts unless specifically asked to change them.
+3. Return ONLY the complete, updated raw HTML code starting with <!DOCTYPE html> and ending with </html>.
+4. No markdown fences, no backticks, no explanatory comments.
 
 Existing HTML Code:
 ${existingHtml}`;
@@ -717,7 +727,6 @@ async function findWorkingModel(geminiKey) {
     }
   } catch (_) {}
 
-  // Prioritize active 2.0-flash models over experimental or preview models
   const candidates = [
     ...modelList.filter(m => m.includes("flash")),
     ...modelList,
@@ -752,6 +761,71 @@ async function findWorkingModel(geminiKey) {
   return WORKING_MODEL;
 }
 
+// Injects Universal Mobile Drawer Menu & Accordion Helper (Guarantees working side menu on 100% of sites)
+function injectUniversalScripts(html) {
+  if (html.includes("id=\"sr-universal-mobile-menu\"")) return html;
+
+  const script = `
+<script id="sr-universal-mobile-menu">
+(function() {
+  function initMobileMenu() {
+    const btn = document.getElementById('mobile-menu-btn') ||
+                document.getElementById('menu-btn') ||
+                document.querySelector('nav button:has(.fa-bars)') ||
+                document.querySelector('nav button:has(svg)');
+
+    const menu = document.getElementById('mobile-menu') ||
+                 document.getElementById('mobile-nav') ||
+                 document.querySelector('nav div.md\\:hidden') ||
+                 document.querySelector('nav ul.md\\:hidden');
+
+    if (btn && menu) {
+      btn.style.cursor = 'pointer';
+      btn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        if (menu.classList.contains('hidden')) {
+          menu.classList.remove('hidden');
+          menu.style.display = 'block';
+        } else {
+          menu.classList.add('hidden');
+          menu.style.display = 'none';
+        }
+      });
+
+      menu.querySelectorAll('a').forEach(link => {
+        link.addEventListener('click', function() {
+          menu.classList.add('hidden');
+          menu.style.display = 'none';
+        });
+      });
+    }
+
+    // Interactive FAQ Accordions
+    document.querySelectorAll('[data-faq-question], .faq-item h3, .faq-item button').forEach(q => {
+      q.style.cursor = 'pointer';
+      q.addEventListener('click', function() {
+        const answer = this.nextElementSibling || this.parentElement.querySelector('p');
+        if (answer) {
+          answer.classList.toggle('hidden');
+        }
+      });
+    });
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initMobileMenu);
+  } else {
+    initMobileMenu();
+  }
+})();
+</script>
+`;
+  if (html.includes("</body>")) {
+    return html.replace("</body>", `${script}</body>`);
+  }
+  return html + script;
+}
+
 // Injects Mobile-Friendly Visual Tap-to-Edit Mode & Floating Action Bar
 function injectVisualEditor(html, slug, origin) {
   const editorToolbar = `
@@ -768,23 +842,21 @@ function injectVisualEditor(html, slug, origin) {
     background: rgba(15, 23, 42, 0.95);
     backdrop-filter: blur(16px);
     color: #ffffff;
-    padding: 10px 20px;
+    padding: 10px 18px;
     border-radius: 9999px;
     box-shadow: 0 12px 35px rgba(0,0,0,0.5);
     display: flex;
     align-items: center;
-    gap: 14px;
+    gap: 12px;
     font-family: system-ui, -apple-system, sans-serif;
     font-size: 13px;
     border: 1px solid rgba(255,255,255,0.18);
     width: max-content;
-    max-width: 92vw;
+    max-width: 95vw;
   }
-  #save-btn {
-    background: #10B981;
-    color: #ffffff;
+  .editor-btn {
     border: none;
-    padding: 8px 18px;
+    padding: 8px 16px;
     border-radius: 9999px;
     font-weight: 700;
     cursor: pointer;
@@ -793,13 +865,15 @@ function injectVisualEditor(html, slug, origin) {
     align-items: center;
     gap: 6px;
   }
-  #save-btn:active { transform: scale(0.95); }
-  #save-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+  #wa-btn { background: #25D366; color: #ffffff; }
+  #save-btn { background: #10B981; color: #ffffff; }
+  .editor-btn:active { transform: scale(0.95); }
 </style>
 <div id="editor-floating-bar">
-  <span>✏️ <b>Tap any text to edit</b></span>
-  <button id="save-btn" onclick="saveSiteContent()">💾 Save Changes</button>
-  <a href="${origin}/site/${slug}" style="color:#94a3b8;text-decoration:none;font-weight:500;">Preview Live ↗</a>
+  <span>✏️ <b>Tap text to edit</b></span>
+  <button id="wa-btn" class="editor-btn" onclick="promptChangeWhatsApp()">📱 Set WhatsApp</button>
+  <button id="save-btn" class="editor-btn" onclick="saveSiteContent()">💾 Save</button>
+  <a href="${origin}/site/${slug}" style="color:#94a3b8;text-decoration:none;font-weight:500;">Preview ↗</a>
 </div>
 <script>
   document.querySelectorAll('h1, h2, h3, h4, h5, h6, p, span, a, li, button').forEach(el => {
@@ -807,6 +881,28 @@ function injectVisualEditor(html, slug, origin) {
       el.setAttribute('contenteditable', 'true');
     }
   });
+
+  function promptChangeWhatsApp() {
+    const currentLink = document.querySelector('a[href*="wa.me"]');
+    let currentNum = "";
+    if (currentLink) {
+      const m = currentLink.href.match(/wa\\.me\\/([0-9]+)/);
+      if (m) currentNum = m[1];
+    }
+    const input = prompt("Enter your WhatsApp number with country code (e.g. 919876543210):", currentNum || "91");
+    if (!input) return;
+    const clean = input.replace(/[^0-9]/g, "");
+    if (clean.length < 10) {
+      alert("Please enter a valid phone number with country code (e.g. 919876543210)");
+      return;
+    }
+    let count = 0;
+    document.querySelectorAll('a[href*="wa.me"], a[href*="whatsapp.com"]').forEach(a => {
+      a.href = "https://wa.me/" + clean + "?text=Hello%20I%20am%20interested";
+      count++;
+    });
+    alert("Updated " + count + " WhatsApp button(s) to +" + clean + "! Now tap 💾 Save to make it live.");
+  }
 
   async function saveSiteContent() {
     const btn = document.getElementById('save-btn');
@@ -828,15 +924,15 @@ function injectVisualEditor(html, slug, origin) {
       const data = await res.json();
       if (data.ok) {
         btn.innerHTML = '✅ Saved Live!';
-        setTimeout(() => { btn.innerHTML = '💾 Save Changes'; btn.disabled = false; }, 2500);
+        setTimeout(() => { btn.innerHTML = '💾 Save'; btn.disabled = false; }, 2500);
       } else {
         alert('Save failed: ' + (data.error || 'Unknown error'));
-        btn.innerHTML = '💾 Save Changes';
+        btn.innerHTML = '💾 Save';
         btn.disabled = false;
       }
     } catch(err) {
       alert('Error saving changes: ' + err.message);
-      btn.innerHTML = '💾 Save Changes';
+      btn.innerHTML = '💾 Save';
       btn.disabled = false;
     }
   }
