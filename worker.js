@@ -12,7 +12,6 @@ const MEM_STATS = {
 };
 const PROCESSED_UPDATES = new Set();
 let ADMIN_BROADCAST_MODE = false;
-let CACHED_MODELS = null;
 
 export default {
   async fetch(request, env, ctx) {
@@ -38,10 +37,10 @@ export default {
 
       let geminiStatus = "⚠️ Not Tested";
       try {
-        const activeModels = await getAvailableFlashModels(geminiKey);
-        geminiStatus = activeModels && activeModels.length > 0
-          ? `<span style='color:green;'>✅ Active (${activeModels.slice(0, 3).join(", ")})</span>`
-          : "<span style='color:red;'>❌ No models available</span>";
+        const testRes = await generateWebsiteCodeWithGemini(geminiKey, "Simple coffee cafe menu");
+        geminiStatus = testRes && testRes.includes("<html")
+          ? `<span style='color:green;'>✅ Active & Fast (${testRes.length} bytes generated)</span>`
+          : "<span style='color:red;'>❌ Returned empty</span>";
       } catch (err) {
         geminiStatus = `<span style='color:red;'>❌ Error: ${err.message}</span>`;
       }
@@ -139,7 +138,7 @@ export default {
       );
     }
 
-    // 4. Telegram Webhook Handler (Immediate 200 OK + Background Execution)
+    // 4. Telegram Webhook Handler
     if (request.method === "POST" && url.pathname === "/webhook") {
       try {
         const update = await request.json();
@@ -158,7 +157,7 @@ export default {
         if (ctx && ctx.waitUntil) {
           ctx.waitUntil(handleUpdate(update, botToken, geminiKey, db, url.origin));
         } else {
-          handleUpdate(update, botToken, geminiKey, db, url.origin).catch(console.error);
+          await handleUpdate(update, botToken, geminiKey, db, url.origin);
         }
       } catch (err) {
         console.error("Webhook error:", err);
@@ -205,11 +204,11 @@ async function handleUpdate(update, botToken, geminiKey, db, originUrl) {
       const promptType = data.replace("demo_", "");
       let demoPrompt = "";
       if (promptType === "gym") {
-        demoPrompt = "Modern unisex fitness gym named IronCore in Jaipur with 3 membership plans, trainer profiles, timetable, and WhatsApp join button.";
+        demoPrompt = "Modern fitness gym named IronCore in Jaipur with membership plans, trainer profiles, timetable, and WhatsApp join button.";
       } else if (promptType === "photo") {
-        demoPrompt = "Luxury wedding and portrait photography portfolio named Lumina Moments in Udaipur with photo gallery, packages, and booking button.";
+        demoPrompt = "Wedding photography portfolio named Lumina Moments in Udaipur with photo gallery, packages, and booking button.";
       } else if (promptType === "cafe") {
-        demoPrompt = "Cozy rooftop cafe named Sunset Brew with coffee and snack menu, customer reviews, photo gallery, and reservation button.";
+        demoPrompt = "Rooftop cafe named Sunset Brew with coffee and snack menu, reviews, and reservation button.";
       }
 
       await tgApi(botToken, "answerCallbackQuery", {
@@ -413,17 +412,43 @@ async function sendWelcomeMenu(botToken, chatId, userId) {
 
 // Main AI Generation & Deployment Pipeline
 async function generateAndDeployWebsite(botToken, geminiKey, db, chatId, userId, userPrompt, originUrl) {
+  // 1. Initial Status Message
   const statusMsg = await tgApi(botToken, "sendMessage", {
     chat_id: chatId,
-    text: `⚡ <b>Analyzing prompt...</b>\n<code>[▓░░░░░░░░░] 15%</code> Designing layout & palette...`,
+    text: `⚡ <b>Analyzing prompt...</b>\n<code>[▓░░░░░░░░░] 20%</code> Designing layout & palette...`,
     parse_mode: "HTML"
   });
 
   const msgId = statusMsg.result?.message_id;
 
+  // 2. Dynamic Progress Ticker
+  let isDone = false;
+  let progressStep = 0;
+  const progressTexts = [
+    `🎨 <b>Building responsive layout...</b>\n<code>[▓▓▓▓░░░░░░] 50%</code> Styling Tailwind & components...`,
+    `📱 <b>Injecting interactive features...</b>\n<code>[▓▓▓▓▓▓▓░░░] 80%</code> Wiring WhatsApp button & navigation...`
+  ];
+
+  const ticker = (async () => {
+    while (!isDone && progressStep < progressTexts.length) {
+      await new Promise((r) => setTimeout(r, 2200));
+      if (isDone) break;
+      if (msgId) {
+        await tgApi(botToken, "editMessageText", {
+          chat_id: chatId,
+          message_id: msgId,
+          text: progressTexts[progressStep],
+          parse_mode: "HTML"
+        });
+      }
+      progressStep++;
+    }
+  })();
+
   try {
-    const aiPromise = generateWebsiteCodeWithGemini(geminiKey, userPrompt);
-    const rawHtml = await trackProgress(botToken, chatId, msgId, aiPromise);
+    const rawHtml = await generateWebsiteCodeWithGemini(geminiKey, userPrompt);
+    isDone = true;
+    await ticker;
 
     if (!rawHtml || rawHtml.length < 200) {
       throw new Error("AI returned empty or invalid HTML. Please try again!");
@@ -467,8 +492,7 @@ async function generateAndDeployWebsite(botToken, geminiKey, db, chatId, userId,
     caption += `✏️ <b>Visual Editor:</b> <a href="${editUrl}">Open Tap-to-Edit Mode</a>\n\n`;
     caption += `✨ <b>Highlights & Features:</b>\n`;
     caption += `• <b>100% Mobile Responsive</b> with Tailwind CSS\n`;
-    caption += `• <b>Dynamic Visuals:</b> Floating gradients & glass cards\n`;
-    caption += `• <b>Interactive WhatsApp CTA:</b> Floating animated booking button\n`;
+    caption += `• <b>Interactive WhatsApp CTA:</b> Floating direct booking button\n`;
     caption += `• <b>Visual In-Browser Editor:</b> Tap any text on screen & save live!\n`;
     caption += `• <b>AI Revisions:</b> Reply to this message with <code>/edit &lt;changes&gt;</code> anytime.\n\n`;
 
@@ -511,12 +535,13 @@ async function generateAndDeployWebsite(botToken, geminiKey, db, chatId, userId,
     } catch (e) {}
 
   } catch (err) {
+    isDone = true;
     console.error("Generation error:", err);
     if (msgId) {
       await tgApi(botToken, "editMessageText", {
         chat_id: chatId,
         message_id: msgId,
-        text: `⚠️ <b>Website generation encountered an error:</b>\n<code>${err.message || "Request timed out"}</code>\n\nPlease tap a demo button or send your prompt again!`,
+        text: `⚠️ <b>Website generation encountered an error:</b>\n<code>${escapeHtml(err.message || "Request timed out")}</code>\n\nPlease tap a demo button or send your prompt again!`,
         parse_mode: "HTML"
       });
     }
@@ -548,8 +573,7 @@ async function modifyWebsiteWithAI(botToken, geminiKey, db, chatId, userId, slug
   const msgId = statusMsg.result?.message_id;
 
   try {
-    const aiPromise = refineWebsiteWithGemini(geminiKey, existingHtml, editPrompt);
-    const updatedHtml = await trackProgress(botToken, chatId, msgId, aiPromise);
+    const updatedHtml = await refineWebsiteWithGemini(geminiKey, existingHtml, editPrompt);
 
     if (!updatedHtml || updatedHtml.length < 200) {
       throw new Error("Could not apply edits.");
@@ -591,75 +615,40 @@ async function modifyWebsiteWithAI(botToken, geminiKey, db, chatId, userId, slug
       await tgApi(botToken, "editMessageText", {
         chat_id: chatId,
         message_id: msgId,
-        text: `⚠️ <b>Edit failed:</b> ${err.message}`,
+        text: `⚠️ <b>Edit failed:</b> ${escapeHtml(err.message)}`,
         parse_mode: "HTML"
       });
     }
   }
 }
 
-// Dynamic Progress Steps Runner
-async function trackProgress(botToken, chatId, msgId, promise) {
-  if (!msgId) return await promise;
-
-  const steps = [
-    { text: `🎨 <b>Building responsive layout...</b>\n<code>[▓▓▓▓░░░░░░] 45%</code> Styling Tailwind & glass cards...`, ms: 2000 },
-    { text: `📱 <b>Injecting dynamic visuals...</b>\n<code>[▓▓▓▓▓▓▓░░░] 75%</code> Adding hover transitions & WhatsApp CTA...`, ms: 2500 },
-    { text: `⚡ <b>Finalizing code architecture...</b>\n<code>[▓▓▓▓▓▓▓▓▓░] 90%</code> Preparing mobile responsiveness...`, ms: 3000 }
-  ];
-
-  let completed = false;
-  const runner = promise
-    .then((res) => { completed = true; return res; })
-    .catch((err) => { completed = true; throw err; });
-
-  (async () => {
-    for (const step of steps) {
-      await new Promise((r) => setTimeout(r, step.ms));
-      if (completed) break;
-      await tgApi(botToken, "editMessageText", {
-        chat_id: chatId,
-        message_id: msgId,
-        text: step.text,
-        parse_mode: "HTML"
-      });
-    }
-  })();
-
-  return await runner;
-}
-
-// Master AI Prompt for Production-Grade HTML5/Tailwind Websites
+// Master AI Prompt for Production-Grade HTML5/Tailwind Websites (Fast, reliable 6-8s output)
 async function generateWebsiteCodeWithGemini(geminiKey, userPrompt) {
   const systemPrompt = `You are an elite principal web designer and frontend architect.
 The user wants a website described as: "${userPrompt}".
 
 Create a single, complete, production-ready, beautiful, mobile-first HTML5 file.
 
-Technical & Visual Requirements:
+Requirements:
 1. Load Tailwind CSS via CDN: <script src="https://cdn.tailwindcss.com"></script>
 2. Load FontAwesome 6 Icons: <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-3. Choose a sleek, modern palette (e.g. slate-950 with cyan/emerald highlights, warm stone with amber, or deep indigo with violet).
-4. Dynamic Visual Elements:
-   - Floating subtle ambient gradient spheres / background glow effects.
-   - Glassmorphic card styling (bg-white/5 backdrop-blur-md border border-white/10).
-   - Smooth hover transitions (hover:scale-[1.02] hover:shadow-2xl transition-all duration-300).
-   - Pulsing fixed WhatsApp floating button at bottom-right (https://wa.me/919876543210?text=Hello%20I%20am%20interested).
-   - Functional Vanilla JS for mobile navbar hamburger toggle & FAQ accordion collapse/expand.
-5. Rich realistic sections:
-   - Modern Sticky Navbar with logo, links, and "Get Started" CTA button.
-   - High-impact Hero Section with bold typography, badges, and primary/secondary buttons.
-   - Features / Services Grid with high-contrast icons.
-   - Pricing or Menu or Showcase Cards (with realistic items, prices in ₹ / $, and highlights).
-   - Testimonials / Social Proof with avatar badges and 5-star ratings.
-   - Interactive FAQ Section with vanilla JS toggle.
-   - Polished Footer.
+3. Choose a sleek, modern palette (e.g. slate-950/cyan for tech/gym, warm stone/amber for cafes, indigo/gold for luxury).
+4. Include rich realistic sections:
+   - Modern Sticky Navbar with brand name, links, and CTA button
+   - Hero Section with bold typography, badges, and primary/secondary CTA buttons
+   - Features / Services Grid with high-contrast cards
+   - Pricing or Menu or Showcase Cards with realistic items and highlights
+   - Testimonials / Social Proof with star ratings
+   - Interactive FAQ Section with vanilla JS toggle
+   - Direct WhatsApp / Contact button: href="https://wa.me/919876543210?text=Hello%20I%20am%20interested"
+   - Polished Footer
+5. Include functional Vanilla JavaScript for mobile menu toggles and FAQ accordion expand/collapse.
 6. Make it completely self-contained. Return ONLY valid raw HTML code without markdown code fences, no backticks, no conversational commentary.`;
 
-  const models = await getAvailableFlashModels(geminiKey);
+  const candidateModels = ["gemini-2.0-flash", "gemini-2.0-flash-exp", "gemini-2.5-flash", "gemini-pro"];
   let lastError = null;
 
-  for (const model of models) {
+  for (const model of candidateModels) {
     try {
       const res = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
@@ -668,15 +657,20 @@ Technical & Visual Requirements:
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             contents: [{ parts: [{ text: systemPrompt }] }],
-            generationConfig: { temperature: 0.3 }
+            generationConfig: {
+              temperature: 0.3,
+              maxOutputTokens: 8192
+            }
           })
         }
       );
+
       if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        lastError = errData.error?.message || `HTTP ${res.status} (${model})`;
+        const errJson = await res.json().catch(() => ({}));
+        lastError = errJson.error?.message || `HTTP ${res.status} (${model})`;
         continue;
       }
+
       const data = await res.json();
       let text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
       text = text.replace(/^```html\s*/i, "").replace(/```\s*$/i, "").trim();
@@ -687,6 +681,7 @@ Technical & Visual Requirements:
       lastError = e.message;
     }
   }
+
   throw new Error(lastError || "Could not generate valid HTML");
 }
 
@@ -703,10 +698,10 @@ Strict Guidelines:
 Existing HTML Code:
 ${existingHtml}`;
 
-  const models = await getAvailableFlashModels(geminiKey);
+  const candidateModels = ["gemini-2.0-flash", "gemini-2.0-flash-exp", "gemini-2.5-flash", "gemini-pro"];
   let lastError = null;
 
-  for (const model of models) {
+  for (const model of candidateModels) {
     try {
       const res = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
@@ -715,15 +710,20 @@ ${existingHtml}`;
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             contents: [{ parts: [{ text: prompt }] }],
-            generationConfig: { temperature: 0.2 }
+            generationConfig: {
+              temperature: 0.2,
+              maxOutputTokens: 8192
+            }
           })
         }
       );
+
       if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        lastError = errData.error?.message || `HTTP ${res.status} (${model})`;
+        const errJson = await res.json().catch(() => ({}));
+        lastError = errJson.error?.message || `HTTP ${res.status} (${model})`;
         continue;
       }
+
       const data = await res.json();
       let text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
       text = text.replace(/^```html\s*/i, "").replace(/```\s*$/i, "").trim();
@@ -734,47 +734,8 @@ ${existingHtml}`;
       lastError = e.message;
     }
   }
+
   throw new Error(lastError || "Could not modify website");
-}
-
-// Model Fallback Discovery (Prioritizes 2.0-flash, filters out deprecated 1.5-flash alias)
-async function getAvailableFlashModels(geminiKey) {
-  if (CACHED_MODELS && CACHED_MODELS.length > 0) return CACHED_MODELS;
-  try {
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models?key=${geminiKey}`
-    );
-    if (res.ok) {
-      const data = await res.json();
-      const allModels = (data.models || [])
-        .filter(
-          (m) =>
-            Array.isArray(m.supportedGenerationMethods) &&
-            m.supportedGenerationMethods.includes("generateContent") &&
-            m.name.includes("gemini") &&
-            !m.name.includes("embedding") &&
-            !m.name.includes("imagen") &&
-            m.name !== "models/gemini-1.5-flash" // Exclude deprecated alias on v1beta
-        )
-        .map((m) => m.name.replace(/^models\//, ""));
-
-      allModels.sort((a, b) => {
-        if (a.includes("2.0-flash")) return -1;
-        if (b.includes("2.0-flash")) return 1;
-        if (a.includes("flash")) return -1;
-        if (b.includes("flash")) return 1;
-        return 0;
-      });
-
-      if (allModels.length > 0) {
-        CACHED_MODELS = allModels;
-        return CACHED_MODELS;
-      }
-    }
-  } catch (e) {
-    console.error("ListModels discovery failed:", e);
-  }
-  return ["gemini-2.0-flash", "gemini-2.0-flash-exp", "gemini-1.5-flash-8b", "gemini-pro"];
 }
 
 // Injects Mobile-Friendly Visual Tap-to-Edit Mode & Floating Action Bar
@@ -827,7 +788,6 @@ function injectVisualEditor(html, slug, origin) {
   <a href="${origin}/site/${slug}" style="color:#94a3b8;text-decoration:none;font-weight:500;">Preview Live ↗</a>
 </div>
 <script>
-  // Enable inline editing on all text elements except editor bar & badges
   document.querySelectorAll('h1, h2, h3, h4, h5, h6, p, span, a, li, button').forEach(el => {
     if (!el.closest('#editor-floating-bar') && !el.closest('#sr-brand-badge')) {
       el.setAttribute('contenteditable', 'true');
@@ -875,7 +835,7 @@ function injectVisualEditor(html, slug, origin) {
   return html + editorToolbar;
 }
 
-// Generates a Clean URL Slug from User Prompt (Short & Safe)
+// Generates a Clean URL Slug from User Prompt
 function generateSlugFromPrompt(prompt) {
   const words = prompt
     .toLowerCase()
@@ -902,6 +862,14 @@ function injectBrandingFooter(html) {
     return html.replace("</body>", `${badge}</body>`);
   }
   return html + badge;
+}
+
+function escapeHtml(str) {
+  if (!str) return "";
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
 }
 
 // User Registration in KV Database
