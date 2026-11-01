@@ -19,7 +19,6 @@ export default {
     const rawBotToken = env && env.BOT_TOKEN ? env.BOT_TOKEN : DEFAULT_BOT_TOKEN;
     const rawGeminiKey = env && env.GEMINI_KEY ? env.GEMINI_KEY : DEFAULT_GEMINI_KEY;
 
-    // Clean keys of any accidental spaces or quotes
     const botToken = rawBotToken.trim().replace(/^["']|["']$/g, "").trim();
     const geminiKey = rawGeminiKey.trim().replace(/^["']|["']$/g, "").trim();
     const db = env && env.BOT_DB ? env.BOT_DB : null;
@@ -40,7 +39,6 @@ export default {
       );
       const tgData = await tgRes.json();
 
-      // Test active Gemini models via live ListModels query
       let geminiStatus = "⚠️ Not Tested";
       let modelListHtml = "";
       try {
@@ -434,41 +432,21 @@ async function sendWelcomeMenu(botToken, chatId, userId) {
 
 // Main AI Generation & Deployment Pipeline
 async function generateAndDeployWebsite(botToken, geminiKey, db, chatId, userId, userPrompt, originUrl) {
+  // 1. Show Telegram native "typing..." status in header
+  await tgApi(botToken, "sendChatAction", { chat_id: chatId, action: "typing" });
+
+  // 2. Send clean status message
   const statusMsg = await tgApi(botToken, "sendMessage", {
     chat_id: chatId,
-    text: `⚡ <b>Analyzing prompt...</b>\n<code>[▓░░░░░░░░░] 20%</code> Designing layout & palette...`,
+    text: `⚡ <b>Designing your website...</b>\n\n<i>Crafting responsive layout, Tailwind components, and WhatsApp booking (~6s)...</i>`,
     parse_mode: "HTML"
   });
 
   const msgId = statusMsg.result?.message_id;
 
-  let isDone = false;
-  let progressStep = 0;
-  const progressTexts = [
-    `🎨 <b>Building responsive layout...</b>\n<code>[▓▓▓▓░░░░░░] 50%</code> Styling Tailwind & components...`,
-    `📱 <b>Injecting interactive features...</b>\n<code>[▓▓▓▓▓▓▓░░░] 80%</code> Wiring WhatsApp button & navigation...`
-  ];
-
-  const ticker = (async () => {
-    while (!isDone && progressStep < progressTexts.length) {
-      await new Promise((r) => setTimeout(r, 2200));
-      if (isDone) break;
-      if (msgId) {
-        await tgApi(botToken, "editMessageText", {
-          chat_id: chatId,
-          message_id: msgId,
-          text: progressTexts[progressStep],
-          parse_mode: "HTML"
-        });
-      }
-      progressStep++;
-    }
-  })();
-
   try {
+    // 3. Generate HTML with Gemini Flash
     const rawHtml = await generateWebsiteCodeWithGemini(geminiKey, userPrompt);
-    isDone = true;
-    await ticker;
 
     if (!rawHtml || rawHtml.length < 200) {
       throw new Error("AI returned empty or invalid HTML. Please try again!");
@@ -477,6 +455,7 @@ async function generateAndDeployWebsite(botToken, geminiKey, db, chatId, userId,
     const cleanSlug = generateSlugFromPrompt(userPrompt);
     const finalHtml = injectBrandingFooter(rawHtml);
 
+    // 4. Save permanently in KV database & RAM cache
     SITE_CACHE.set(cleanSlug, finalHtml);
     if (db) {
       try {
@@ -515,30 +494,25 @@ async function generateAndDeployWebsite(botToken, geminiKey, db, chatId, userId,
     caption += `• <b>Interactive WhatsApp CTA:</b> Floating direct booking button\n`;
     caption += `• <b>Visual In-Browser Editor:</b> Tap any text on screen & save live!\n`;
     caption += `• <b>AI Revisions:</b> Reply to this message with <code>/edit &lt;changes&gt;</code> anytime.\n\n`;
-
-    if (!db) {
-      caption += `⚠️ <b>Note:</b> Cloudflare KV <code>BOT_DB</code> is not bound yet. Bind it in Cloudflare Settings &rarr; Bindings to keep links permanent!\n\n`;
-    }
-
     caption += `<i>Tap "Open Live Website" to view or "Tap-to-Edit on Phone" to customize text!</i>`;
 
+    // 5. Cleanly remove the waiting message
     if (msgId) {
-      await tgApi(botToken, "editMessageText", {
+      await tgApi(botToken, "deleteMessage", {
         chat_id: chatId,
-        message_id: msgId,
-        text: caption,
-        parse_mode: "HTML",
-        reply_markup: actionButtons
-      });
-    } else {
-      await tgApi(botToken, "sendMessage", {
-        chat_id: chatId,
-        text: caption,
-        parse_mode: "HTML",
-        reply_markup: actionButtons
+        message_id: msgId
       });
     }
 
+    // 6. Deliver the finished website card with buttons
+    await tgApi(botToken, "sendMessage", {
+      chat_id: chatId,
+      text: caption,
+      parse_mode: "HTML",
+      reply_markup: actionButtons
+    });
+
+    // 7. Send standalone index.html source code file
     try {
       const form = new FormData();
       form.append("chat_id", String(chatId));
@@ -553,16 +527,15 @@ async function generateAndDeployWebsite(botToken, geminiKey, db, chatId, userId,
     } catch (e) {}
 
   } catch (err) {
-    isDone = true;
     console.error("Generation error:", err);
     if (msgId) {
-      await tgApi(botToken, "editMessageText", {
-        chat_id: chatId,
-        message_id: msgId,
-        text: `⚠️ <b>Website generation encountered an error:</b>\n<code>${escapeHtml(err.message || "Request timed out")}</code>\n\nPlease tap a demo button or send your prompt again!`,
-        parse_mode: "HTML"
-      });
+      await tgApi(botToken, "deleteMessage", { chat_id: chatId, message_id: msgId }).catch(() => {});
     }
+    await tgApi(botToken, "sendMessage", {
+      chat_id: chatId,
+      text: `⚠️ <b>Website generation encountered an error:</b>\n<code>${escapeHtml(err.message || "Request timed out")}</code>\n\nPlease tap a demo button or send your prompt again!`,
+      parse_mode: "HTML"
+    });
   }
 }
 
@@ -584,7 +557,7 @@ async function modifyWebsiteWithAI(botToken, geminiKey, db, chatId, userId, slug
 
   const statusMsg = await tgApi(botToken, "sendMessage", {
     chat_id: chatId,
-    text: `⚡ <b>Applying your modifications...</b>\n<code>[▓▓▓░░░░░░░] 30%</code> Updating design & text with AI...`,
+    text: `⚡ <b>Applying your modifications...</b>\n\n<i>Updating design and text with AI...</i>`,
     parse_mode: "HTML"
   });
 
@@ -613,34 +586,35 @@ async function modifyWebsiteWithAI(botToken, geminiKey, db, chatId, userId, slug
     const caption = `✅ <b>Your website has been updated!</b>\n\n🔗 <b>Updated Live Link:</b> <a href="${liveUrl}">${liveUrl}</a>\n✏️ <b>Visual Editor:</b> <a href="${editUrl}">Open Tap-to-Edit</a>\n\n<i>Your changes are live immediately for all visitors!</i>`;
 
     if (msgId) {
-      await tgApi(botToken, "editMessageText", {
-        chat_id: chatId,
-        message_id: msgId,
-        text: caption,
-        parse_mode: "HTML",
-        reply_markup: {
-          inline_keyboard: [
-            [
-              { text: "🌐 Open Updated Website", url: liveUrl },
-              { text: "✏️ Tap-to-Edit on Phone", url: editUrl }
-            ]
-          ]
-        }
-      });
+      await tgApi(botToken, "deleteMessage", { chat_id: chatId, message_id: msgId }).catch(() => {});
     }
+
+    await tgApi(botToken, "sendMessage", {
+      chat_id: chatId,
+      text: caption,
+      parse_mode: "HTML",
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: "🌐 Open Updated Website", url: liveUrl },
+            { text: "✏️ Tap-to-Edit on Phone", url: editUrl }
+          ]
+        ]
+      }
+    });
   } catch (err) {
     if (msgId) {
-      await tgApi(botToken, "editMessageText", {
-        chat_id: chatId,
-        message_id: msgId,
-        text: `⚠️ <b>Edit failed:</b> ${escapeHtml(err.message)}`,
-        parse_mode: "HTML"
-      });
+      await tgApi(botToken, "deleteMessage", { chat_id: chatId, message_id: msgId }).catch(() => {});
     }
+    await tgApi(botToken, "sendMessage", {
+      chat_id: chatId,
+      text: `⚠️ <b>Edit failed:</b> ${escapeHtml(err.message)}`,
+      parse_mode: "HTML"
+    });
   }
 }
 
-// Master AI Prompt for Production-Grade HTML5/Tailwind Websites
+// Master AI Prompt for Production-Grade HTML5/Tailwind Websites (Fast & Clean)
 async function generateWebsiteCodeWithGemini(geminiKey, userPrompt) {
   const systemPrompt = `You are an elite principal web designer and frontend architect.
 The user wants a website described as: "${userPrompt}".
@@ -663,10 +637,10 @@ Requirements:
 5. Include functional Vanilla JavaScript for mobile menu toggles and FAQ accordion expand/collapse.
 6. Make it completely self-contained. Return ONLY valid raw HTML code without markdown code fences, no backticks, no conversational commentary.`;
 
-  const models = await getAvailableFlashModels(geminiKey);
+  const candidateModels = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-pro"];
   let lastError = null;
 
-  for (const model of models) {
+  for (const model of candidateModels) {
     try {
       const res = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
@@ -716,10 +690,10 @@ Strict Guidelines:
 Existing HTML Code:
 ${existingHtml}`;
 
-  const models = await getAvailableFlashModels(geminiKey);
+  const candidateModels = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-pro"];
   let lastError = null;
 
-  for (const model of models) {
+  for (const model of candidateModels) {
     try {
       const res = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
@@ -754,46 +728,6 @@ ${existingHtml}`;
   }
 
   throw new Error(lastError || "Could not modify website");
-}
-
-// Model Fallback Discovery: Uses active models returned by Google for this key
-async function getAvailableFlashModels(geminiKey) {
-  if (CACHED_MODELS && CACHED_MODELS.length > 0) return CACHED_MODELS;
-  try {
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models?key=${geminiKey}`
-    );
-    if (res.ok) {
-      const data = await res.json();
-      const allModels = (data.models || [])
-        .filter(
-          (m) =>
-            Array.isArray(m.supportedGenerationMethods) &&
-            m.supportedGenerationMethods.includes("generateContent") &&
-            m.name.includes("gemini") &&
-            !m.name.includes("embedding") &&
-            !m.name.includes("imagen")
-        )
-        .map((m) => m.name.replace(/^models\//, ""));
-
-      // Sort flash models to the front
-      allModels.sort((a, b) => {
-        if (a.includes("2.0-flash")) return -1;
-        if (b.includes("2.0-flash")) return 1;
-        if (a.includes("flash")) return -1;
-        if (b.includes("flash")) return 1;
-        return 0;
-      });
-
-      if (allModels.length > 0) {
-        CACHED_MODELS = allModels;
-        return CACHED_MODELS;
-      }
-    }
-  } catch (e) {
-    console.error("ListModels discovery failed:", e);
-  }
-  return ["gemini-2.0-flash", "gemini-2.0-flash-exp", "gemini-2.5-flash", "gemini-1.5-flash-latest"];
 }
 
 // Injects Mobile-Friendly Visual Tap-to-Edit Mode & Floating Action Bar
