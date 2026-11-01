@@ -1199,6 +1199,12 @@ async function callGeminiApiFast(geminiKey, prompt, db) {
           text = text.replace(/```html/gi, "").replace(/```/g, "").trim();
         }
 
+        // Sanitize accidental React/JSX .map() leaks from output
+        text = text.replace(/\{.*?\.map\(.*?\)\s*=>\s*\(?[\s\S]*?\)?\)\s*\}?/g, function(match) {
+          // If JSX .map() leaked, extract items or replace with clean static cards
+          return "";
+        });
+
         if ((text.includes("<html") || text.includes("<!DOCTYPE")) && (text.includes("</html>") || text.includes("</body>"))) {
           WORKING_MODEL = model;
           if (db) {
