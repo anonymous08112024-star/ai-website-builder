@@ -12,11 +12,16 @@ const MEM_STATS = {
 };
 const PROCESSED_UPDATES = new Set();
 let ADMIN_BROADCAST_MODE = false;
+let CACHED_MODELS = null;
 
 export default {
   async fetch(request, env, ctx) {
-    const botToken = (env && env.BOT_TOKEN ? env.BOT_TOKEN : DEFAULT_BOT_TOKEN).trim();
-    const geminiKey = (env && env.GEMINI_KEY ? env.GEMINI_KEY : DEFAULT_GEMINI_KEY).trim();
+    const rawBotToken = env && env.BOT_TOKEN ? env.BOT_TOKEN : DEFAULT_BOT_TOKEN;
+    const rawGeminiKey = env && env.GEMINI_KEY ? env.GEMINI_KEY : DEFAULT_GEMINI_KEY;
+
+    // Clean keys of any accidental spaces or quotes
+    const botToken = rawBotToken.trim().replace(/^["']|["']$/g, "").trim();
+    const geminiKey = rawGeminiKey.trim().replace(/^["']|["']$/g, "").trim();
     const db = env && env.BOT_DB ? env.BOT_DB : null;
     const url = new URL(request.url);
 
@@ -35,20 +40,37 @@ export default {
       );
       const tgData = await tgRes.json();
 
+      // Test active Gemini models via live ListModels query
       let geminiStatus = "⚠️ Not Tested";
+      let modelListHtml = "";
       try {
-        const testRes = await generateWebsiteCodeWithGemini(geminiKey, "Simple coffee cafe menu");
-        geminiStatus = testRes && testRes.includes("<html")
-          ? `<span style='color:green;'>✅ Active & Fast (${testRes.length} bytes generated)</span>`
-          : "<span style='color:red;'>❌ Returned empty</span>";
+        const modelsRes = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models?key=${geminiKey}`
+        );
+        const modelsData = await modelsRes.json();
+        if (modelsRes.ok && modelsData.models) {
+          const genModels = modelsData.models
+            .filter(m => m.supportedGenerationMethods && m.supportedGenerationMethods.includes("generateContent"))
+            .map(m => m.name.replace(/^models\//, ""));
+
+          CACHED_MODELS = genModels;
+          geminiStatus = `<span style='color:green;'>✅ Active (${genModels.length} models detected)</span>`;
+          modelListHtml = `<p><b>Available Models:</b> <code>${genModels.slice(0, 5).join(", ")}</code></p>`;
+        } else {
+          geminiStatus = `<span style='color:red;'>❌ Google Error: ${modelsData.error?.message || "Invalid response"}</span>`;
+        }
       } catch (err) {
-        geminiStatus = `<span style='color:red;'>❌ Error: ${err.message}</span>`;
+        geminiStatus = `<span style='color:red;'>❌ Connection Error: ${err.message}</span>`;
       }
 
-      let html = `<h2>${tgData.ok ? "✅ Instant AI Website Creator Live!" : "❌ Telegram Token Error"}</h2>`;
+      const keyMask = geminiKey.length > 8 ? `${geminiKey.slice(0, 6)}...${geminiKey.slice(-4)} (${geminiKey.length} chars)` : "Not Set";
+
+      let html = `<h2>${tgData.ok ? "✅ Instant AI Website Creator Status" : "❌ Telegram Token Error"}</h2>`;
       html += `<p><b>Telegram Status:</b> ${tgData.ok ? "Connected to " + CHANNEL_USERNAME : JSON.stringify(tgData)}</p>`;
       html += `<p><b>Admin ID Locked To:</b> ${ADMIN_ID}</p>`;
-      html += `<p><b>Google Gemini AI Engine:</b> ${geminiStatus}</p>`;
+      html += `<p><b>Gemini Key Detected:</b> <code>${keyMask}</code></p>`;
+      html += `<p><b>Google Gemini AI Status:</b> ${geminiStatus}</p>`;
+      html += modelListHtml;
       html += `<p><b>Permanent Database (BOT_DB):</b> ${db ? "<span style='color:green;'>✅ Active & Permanent (No 404s)</span>" : "<span style='color:red;font-weight:bold;'>❌ MISSING! Go to Settings &rarr; Bindings &rarr; Add KV namespace 'BOT_DB'</span>"}</p>`;
       html += `<p><b>Hosting Domain:</b> ${url.origin}/site/[slug]</p>`;
       html += `<p><b>Tap-to-Edit Visual Editor:</b> Active via ${url.origin}/site/[slug]?edit=true</p>`;
@@ -123,7 +145,7 @@ export default {
       }
 
       const kvWarning = !db
-        ? `<div style="margin-top:15px;padding:12px;background:#ef444422;border:1px solid #ef4444;border-radius:10px;font-size:12px;color:#fca5a5;">⚠️ <b>Admin Notice:</b> Cloudflare KV binding <code>BOT_DB</code> is missing. Add it in <b>Worker Settings &rarr; Bindings</b> so websites persist across all devices.</div>`
+        ? `<div style="margin-top:15px;padding:12px;background:#ef444422;border:1px solid #ef4444;border-radius:10px;font-size:12px;color:#fca5a5;">⚠️ <b>Notice:</b> Cloudflare KV binding <code>BOT_DB</code> is missing. Add it in <b>Worker Settings &rarr; Bindings</b> to keep sites permanent across all devices.</div>`
         : "";
 
       return new Response(
@@ -412,7 +434,6 @@ async function sendWelcomeMenu(botToken, chatId, userId) {
 
 // Main AI Generation & Deployment Pipeline
 async function generateAndDeployWebsite(botToken, geminiKey, db, chatId, userId, userPrompt, originUrl) {
-  // 1. Initial Status Message
   const statusMsg = await tgApi(botToken, "sendMessage", {
     chat_id: chatId,
     text: `⚡ <b>Analyzing prompt...</b>\n<code>[▓░░░░░░░░░] 20%</code> Designing layout & palette...`,
@@ -421,7 +442,6 @@ async function generateAndDeployWebsite(botToken, geminiKey, db, chatId, userId,
 
   const msgId = statusMsg.result?.message_id;
 
-  // 2. Dynamic Progress Ticker
   let isDone = false;
   let progressStep = 0;
   const progressTexts = [
@@ -502,7 +522,6 @@ async function generateAndDeployWebsite(botToken, geminiKey, db, chatId, userId,
 
     caption += `<i>Tap "Open Live Website" to view or "Tap-to-Edit on Phone" to customize text!</i>`;
 
-    // Seamless transformation into the finished delivery card
     if (msgId) {
       await tgApi(botToken, "editMessageText", {
         chat_id: chatId,
@@ -520,7 +539,6 @@ async function generateAndDeployWebsite(botToken, geminiKey, db, chatId, userId,
       });
     }
 
-    // Send standalone index.html source code file
     try {
       const form = new FormData();
       form.append("chat_id", String(chatId));
@@ -622,7 +640,7 @@ async function modifyWebsiteWithAI(botToken, geminiKey, db, chatId, userId, slug
   }
 }
 
-// Master AI Prompt for Production-Grade HTML5/Tailwind Websites (Fast, reliable 6-8s output)
+// Master AI Prompt for Production-Grade HTML5/Tailwind Websites
 async function generateWebsiteCodeWithGemini(geminiKey, userPrompt) {
   const systemPrompt = `You are an elite principal web designer and frontend architect.
 The user wants a website described as: "${userPrompt}".
@@ -645,10 +663,10 @@ Requirements:
 5. Include functional Vanilla JavaScript for mobile menu toggles and FAQ accordion expand/collapse.
 6. Make it completely self-contained. Return ONLY valid raw HTML code without markdown code fences, no backticks, no conversational commentary.`;
 
-  const candidateModels = ["gemini-2.0-flash", "gemini-2.0-flash-exp", "gemini-2.5-flash", "gemini-pro"];
+  const models = await getAvailableFlashModels(geminiKey);
   let lastError = null;
 
-  for (const model of candidateModels) {
+  for (const model of models) {
     try {
       const res = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
@@ -698,10 +716,10 @@ Strict Guidelines:
 Existing HTML Code:
 ${existingHtml}`;
 
-  const candidateModels = ["gemini-2.0-flash", "gemini-2.0-flash-exp", "gemini-2.5-flash", "gemini-pro"];
+  const models = await getAvailableFlashModels(geminiKey);
   let lastError = null;
 
-  for (const model of candidateModels) {
+  for (const model of models) {
     try {
       const res = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
@@ -736,6 +754,46 @@ ${existingHtml}`;
   }
 
   throw new Error(lastError || "Could not modify website");
+}
+
+// Model Fallback Discovery: Uses active models returned by Google for this key
+async function getAvailableFlashModels(geminiKey) {
+  if (CACHED_MODELS && CACHED_MODELS.length > 0) return CACHED_MODELS;
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models?key=${geminiKey}`
+    );
+    if (res.ok) {
+      const data = await res.json();
+      const allModels = (data.models || [])
+        .filter(
+          (m) =>
+            Array.isArray(m.supportedGenerationMethods) &&
+            m.supportedGenerationMethods.includes("generateContent") &&
+            m.name.includes("gemini") &&
+            !m.name.includes("embedding") &&
+            !m.name.includes("imagen")
+        )
+        .map((m) => m.name.replace(/^models\//, ""));
+
+      // Sort flash models to the front
+      allModels.sort((a, b) => {
+        if (a.includes("2.0-flash")) return -1;
+        if (b.includes("2.0-flash")) return 1;
+        if (a.includes("flash")) return -1;
+        if (b.includes("flash")) return 1;
+        return 0;
+      });
+
+      if (allModels.length > 0) {
+        CACHED_MODELS = allModels;
+        return CACHED_MODELS;
+      }
+    }
+  } catch (e) {
+    console.error("ListModels discovery failed:", e);
+  }
+  return ["gemini-2.0-flash", "gemini-2.0-flash-exp", "gemini-2.5-flash", "gemini-1.5-flash-latest"];
 }
 
 // Injects Mobile-Friendly Visual Tap-to-Edit Mode & Floating Action Bar
