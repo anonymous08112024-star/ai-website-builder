@@ -1150,7 +1150,7 @@ async function callGeminiApiFast(geminiKey, prompt, db) {
     try {
       let genConfig = {
         temperature: 0.4,
-        maxOutputTokens: 2500
+        maxOutputTokens: 4096
       };
 
       // gemini-3.5-flash-lite has default minimal thinking for ultra-fast generation
@@ -1192,9 +1192,14 @@ async function callGeminiApiFast(geminiKey, prompt, db) {
       if (res.ok) {
         const data = await res.json();
         let text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-        text = text.replace(/^```html\s*/i, "").replace(/```\s*$/i, "").trim();
+        const htmlMatch = text.match(/<(!DOCTYPE\s+html|html)[\s\S]*?<\/html>/i);
+        if (htmlMatch) {
+          text = htmlMatch[0].trim();
+        } else {
+          text = text.replace(/```html/gi, "").replace(/```/g, "").trim();
+        }
 
-        if (text.includes("<html") || text.includes("<!DOCTYPE") || text.includes("<body")) {
+        if ((text.includes("<html") || text.includes("<!DOCTYPE")) && (text.includes("</html>") || text.includes("</body>"))) {
           WORKING_MODEL = model;
           if (db) {
             try { await db.put("working_model", model); } catch (_) {}
@@ -1213,30 +1218,38 @@ async function callGeminiApiFast(geminiKey, prompt, db) {
 
 // Master AI Prompt with Instant Synthesizer Safety Net
 async function generateWebsiteCodeWithGemini(geminiKey, userPrompt, db) {
-  const systemPrompt = `You are an elite web developer.
-Build a compact, beautiful, mobile-first HTML5 website using Tailwind CSS and FontAwesome 6 for: "${userPrompt}".
-Requirements:
-1. Load Tailwind CDN: <script src="https://cdn.tailwindcss.com"></script>
-2. Load FontAwesome CDN: <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-3. Modern dark palette with sticky navbar, mobile button (<button id="mobile-menu-btn" class="md:hidden"><i class="fa-solid fa-bars"></i></button>), and mobile drawer (<div id="mobile-menu" class="hidden md:hidden">...</div>).
-4. Hero with WhatsApp CTA: href="https://wa.me/919876543210?text=Hello"
-5. 3 feature cards, pricing/showcase, testimonials, FAQ, and footer.
-6. Keep HTML punchy and under 1500 tokens. Return ONLY raw HTML starting with <!DOCTYPE html>.`;
+  const systemPrompt = `You are an elite principal web developer.
+Build a complete, responsive, single-file HTML5 landing page for: "${userPrompt}".
+
+CRITICAL OUTPUT RULES:
+1. Return ONLY the complete raw HTML starting with <!DOCTYPE html> and ending with </html>.
+2. Absolutely NO markdown fences, NO \`\`\`html, NO \`\`\`, and NO conversational explanations.
+3. Every tag, div, section, and script MUST be properly closed. Do not stop midway.
+4. Load Tailwind CSS CDN: <script src="https://cdn.tailwindcss.com"></script>
+5. Load FontAwesome CDN: <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+6. Layout Requirements:
+   - Sticky navbar with brand logo/name, links, mobile button (<button id="mobile-menu-btn" class="md:hidden text-2xl p-2"><i class="fa-solid fa-bars"></i></button>), and mobile drawer (<div id="mobile-menu" class="hidden md:hidden">...</div>).
+   - High-impact Hero section with primary & secondary CTAs.
+   - Key Features / Services grid with icons.
+   - Showcase / Portfolio / Pricing cards.
+   - Testimonials / Reviews with stars.
+   - Interactive FAQ accordion.
+   - Direct WhatsApp CTA: href="https://wa.me/919876543210?text=Hello"
+   - Clean footer.`;
 
   let aiHtml = null;
   try {
     aiHtml = await callGeminiApiFast(geminiKey, systemPrompt, db);
   } catch (_) {}
 
-  if (aiHtml && aiHtml.length > 300) {
+  if (aiHtml && aiHtml.length > 500 && (aiHtml.includes("</html>") || aiHtml.includes("</body>"))) {
     return aiHtml;
   }
 
-  // Guaranteed instant fallback: Never time out, never fail!
+  // Guaranteed instant fallback: Never time out, never fail, never show broken code!
   return synthesizeSmartWebsite(userPrompt);
 }
 
-// AI Modification Engine with Instant Intelligent Fallback
 async function refineWebsiteWithGemini(geminiKey, existingHtml, editInstructions, db) {
   const prompt = `Modify the following HTML based on: "${editInstructions}".
 CRITICAL: If asked to change location, city, business name, or phone: replace EVERY single occurrence across the entire document.
@@ -1258,87 +1271,75 @@ ${existingHtml}`;
 }
 
 function injectUniversalScripts(html) {
-  if (html.includes("id=\"sr-universal-mobile-menu\"")) return html;
+  if (!html || html.includes('id="sr-universal-mobile-menu"')) return html;
 
   const script = `
 <script id="sr-universal-mobile-menu">
-(function() {
-  function initMobileMenu() {
-    var btn = document.getElementById('mobile-menu-btn') ||
-              document.getElementById('menu-btn') ||
+document.addEventListener("DOMContentLoaded", function() {
+  try {
+    var btn = document.getElementById("mobile-menu-btn") ||
+              document.getElementById("menu-btn") ||
               document.querySelector('button[aria-label*="menu" i]');
 
     if (!btn) {
-      var allBtns = document.querySelectorAll('nav button, header button');
-      for (var i = 0; i < allBtns.length; i++) {
-        if (allBtns[i].querySelector('.fa-bars, .fa-navicon, svg, [class*="bar"], [class*="menu"]')) {
-          btn = allBtns[i];
-          break;
+      document.querySelectorAll("nav button, header button").forEach(function(b) {
+        if (!btn && b.querySelector(".fa-bars, .fa-navicon, svg, [class*='bar'], [class*='menu']")) {
+          btn = b;
         }
-      }
+      });
     }
 
-    var menu = document.getElementById('mobile-menu') ||
-               document.getElementById('mobile-nav') ||
-               document.querySelector('nav div.md\:hidden') ||
-               document.querySelector('nav ul.md\:hidden');
+    var menu = document.getElementById("mobile-menu") ||
+               document.getElementById("mobile-nav") ||
+               document.querySelector("nav div.md\\:hidden") ||
+               document.querySelector("nav ul.md\\:hidden");
 
     if (btn && menu) {
-      btn.style.cursor = 'pointer';
-      btn.onclick = function(e) {
+      btn.style.cursor = "pointer";
+      btn.addEventListener("click", function(e) {
         e.stopPropagation();
-        if (menu.classList.contains('hidden') || menu.style.display === 'none') {
-          menu.classList.remove('hidden');
-          menu.style.display = 'block';
+        var isHidden = menu.classList.contains("hidden") || menu.style.display === "none";
+        if (isHidden) {
+          menu.classList.remove("hidden");
+          menu.style.display = "block";
         } else {
-          menu.classList.add('hidden');
-          menu.style.display = 'none';
+          menu.classList.add("hidden");
+          menu.style.display = "none";
         }
-      };
+      });
 
-      var links = menu.querySelectorAll('a');
-      for (var j = 0; j < links.length; j++) {
-        links[j].onclick = function() {
-          menu.classList.add('hidden');
-          menu.style.display = 'none';
-        };
-      }
+      menu.querySelectorAll("a").forEach(function(link) {
+        link.addEventListener("click", function() {
+          menu.classList.add("hidden");
+          menu.style.display = "none";
+        });
+      });
     }
 
-    // Interactive FAQ Accordions
-    var faqQuestions = document.querySelectorAll('[data-faq-question], .faq-item h3, .faq-item button, [class*="faq"] button');
-    for (var k = 0; k < faqQuestions.length; k++) {
-      faqQuestions[k].style.cursor = 'pointer';
-      faqQuestions[k].onclick = function() {
-        var ans = this.nextElementSibling || (this.parentElement ? this.parentElement.querySelector('p, div') : null);
+    // FAQ Accordion Toggle
+    document.querySelectorAll("[data-faq-question], .faq-item h3, .faq-item button, [class*='faq'] button").forEach(function(q) {
+      q.style.cursor = "pointer";
+      q.addEventListener("click", function() {
+        var ans = this.nextElementSibling || (this.parentElement ? this.parentElement.querySelector("p, div") : null);
         if (ans) {
-          if (ans.classList.contains('hidden') || ans.style.display === 'none') {
-            ans.classList.remove('hidden');
-            ans.style.display = 'block';
-          } else {
-            ans.classList.add('hidden');
-            ans.style.display = 'none';
-          }
+          ans.classList.toggle("hidden");
         }
-      };
-    }
-  }
-
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', initMobileMenu);
-  } else {
-    initMobileMenu();
-  }
-})();
+      });
+    });
+  } catch (err) {}
+});
 </script>
 `;
-  if (html.includes("</body>")) {
-    return html.replace("</body>", `${script}</body>`);
+
+  let cleanHtml = html;
+  if (cleanHtml.includes("</body>")) {
+    return cleanHtml.replace(/<\/body>/i, script + "</body>");
+  } else if (cleanHtml.includes("</html>")) {
+    return cleanHtml.replace(/<\/html>/i, script + "</html>");
   }
-  return html + script;
+  return cleanHtml + script;
 }
 
-// Injects Mobile-Friendly Visual Tap-to-Edit Mode & Floating Action Bar
 function injectVisualEditor(html, slug, origin) {
   const editorToolbar = `
 <!-- START_EDITOR -->
