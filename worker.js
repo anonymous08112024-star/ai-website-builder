@@ -58,7 +58,6 @@ export default {
           detectedCount = validModels.length;
           allModelsList = validModels.join(", ");
 
-          // Test models one by one with a lightweight 2-byte prompt
           for (const m of validModels) {
             try {
               const testRes = await fetch(
@@ -468,7 +467,7 @@ async function sendWelcomeMenu(botToken, chatId, userId) {
 
   await tgApi(botToken, "sendMessage", {
     chat_id: chatId,
-    text: `🚀 <b>Instant AI Website Creator & Visual Editor</b>\n\nDescribe the website you want in casual English or Hindi:\n\n• <b>Business:</b> Gym, Cafe, Restaurant, Dental Clinic\n• <b>Portfolio:</b> Photography, Freelancer, Coding, Resume\n• <b>Store / Agency:</b> Clothing Brand, Real Estate, Consulting\n\n✨ <b>Superpowers:</b>\n1. 🌐 <b>Instant Live Hosting:</b> Live link generated in ~5s.\n2. 📱 <b>Working Mobile Drawer Menu:</b> Responsive side menu on all devices.\n3. ✏️ <b>Visual Tap-to-Edit:</b> Tap any text on phone to edit & tap <b>"📱 Set WhatsApp"</b> to update your contact number!\n4. 🤖 <b>AI Revisions:</b> Type <code>/edit change location to Nathdwara</code> anytime.\n\n<i>Example: "Create a modern dark-mode website for a cafe in Nathdwara with menu and WhatsApp button."</i>\n\n👇 <b>Send your prompt now or try a demo template below:</b>`,
+    text: `🚀 <b>Instant AI Website Creator & Visual Editor</b>\n\nDescribe the website you want in casual English or Hindi:\n\n• <b>Business:</b> Gym, Cafe, Restaurant, Dental Clinic\n• <b>Portfolio:</b> Photography, Freelancer, Coding, Resume\n• <b>Store / Agency:</b> Clothing Brand, Real Estate, Consulting\n\n✨ <b>Superpowers:</b>\n1. 🌐 <b>Instant Live Hosting:</b> Live link generated in seconds.\n2. 📱 <b>Working Mobile Drawer Menu:</b> Responsive side menu on all devices.\n3. ✏️ <b>Visual Tap-to-Edit:</b> Tap any text on phone to edit & tap <b>"📱 Set WhatsApp"</b> to update your contact number!\n4. 🤖 <b>AI Revisions:</b> Type <code>/edit change location to Nathdwara</code> anytime.\n\n<i>Example: "Create a modern dark-mode website for a cafe in Nathdwara with menu and WhatsApp button."</i>\n\n👇 <b>Send your prompt now or try a demo template below:</b>`,
     parse_mode: "HTML",
     reply_markup: { inline_keyboard: keyboard }
   });
@@ -480,7 +479,7 @@ async function generateAndDeployWebsite(botToken, geminiKey, db, chatId, userId,
 
   const statusMsg = await tgApi(botToken, "sendMessage", {
     chat_id: chatId,
-    text: `⚡ <b>Designing your website...</b>\n\n<i>Crafting responsive layout, mobile drawer menu, and WhatsApp booking (~5s)...</i>`,
+    text: `⚡ <b>Designing your website...</b>\n\n<i>Crafting responsive layout, mobile drawer menu, and WhatsApp booking...</i>`,
     parse_mode: "HTML"
   });
 
@@ -510,7 +509,7 @@ async function generateAndDeployWebsite(botToken, geminiKey, db, chatId, userId,
 
     const liveUrl = `${originUrl}/site/${cleanSlug}`;
     const editUrl = `${originUrl}/site/${cleanSlug}?edit=true`;
-    const shareText = encodeURIComponent(`Check out my new website built in 5 seconds with ${CHANNEL_USERNAME} 🚀: ${liveUrl}`);
+    const shareText = encodeURIComponent(`Check out my new website built in seconds with ${CHANNEL_USERNAME} 🚀: ${liveUrl}`);
     const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(liveUrl)}&text=${shareText}`;
     const channelHandle = CHANNEL_USERNAME.replace("@", "");
 
@@ -674,12 +673,12 @@ Requirements:
    - Interactive FAQ Section with vanilla JS toggle
    - Direct WhatsApp / Contact button: href="https://wa.me/919876543210?text=Hello%20I%20am%20interested"
    - Polished Footer
-5. Make it completely self-contained. Return ONLY valid raw HTML code without markdown code fences, no backticks, no conversational commentary.`;
+5. Make it concise and clean. Return ONLY valid raw HTML code without markdown code fences, no backticks, no conversational commentary.`;
 
   const model = await getWorkingModel(geminiKey, db);
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 16000);
+  const timeoutId = setTimeout(() => controller.abort(), 25000);
 
   try {
     const res = await fetch(
@@ -692,7 +691,7 @@ Requirements:
           contents: [{ parts: [{ text: systemPrompt }] }],
           generationConfig: {
             temperature: 0.3,
-            maxOutputTokens: 8192
+            maxOutputTokens: 4096
           }
         })
       }
@@ -713,7 +712,7 @@ Requirements:
     }
   } catch (e) {
     clearTimeout(timeoutId);
-    throw new Error(e.name === "AbortError" ? "AI generation timed out after 16s" : e.message);
+    throw new Error(e.name === "AbortError" ? "AI generation timed out after 25s" : e.message);
   }
 
   throw new Error("Could not generate valid HTML");
@@ -736,7 +735,7 @@ ${existingHtml}`;
   const model = await getWorkingModel(geminiKey, db);
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 16000);
+  const timeoutId = setTimeout(() => controller.abort(), 25000);
 
   try {
     const res = await fetch(
@@ -749,7 +748,7 @@ ${existingHtml}`;
           contents: [{ parts: [{ text: prompt }] }],
           generationConfig: {
             temperature: 0.2,
-            maxOutputTokens: 8192
+            maxOutputTokens: 4096
           }
         })
       }
@@ -770,7 +769,7 @@ ${existingHtml}`;
     }
   } catch (e) {
     clearTimeout(timeoutId);
-    throw new Error(e.name === "AbortError" ? "AI modification timed out after 16s" : e.message);
+    throw new Error(e.name === "AbortError" ? "AI modification timed out after 25s" : e.message);
   }
 
   throw new Error("Could not modify website");
@@ -790,7 +789,6 @@ async function getWorkingModel(geminiKey, db) {
     } catch (_) {}
   }
 
-  // Quick live discovery if not cached yet
   try {
     const modelsRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${geminiKey}`);
     const data = await modelsRes.json();
