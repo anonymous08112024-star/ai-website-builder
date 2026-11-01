@@ -14,6 +14,16 @@ const PROCESSED_UPDATES = new Set();
 let ADMIN_BROADCAST_MODE = false;
 let WORKING_MODEL = null;
 
+// Fast Production Models in Priority Order (Flash & Flash-Lite First)
+const FAST_CANDIDATE_MODELS = [
+  "gemini-2.5-flash",
+  "gemini-2.5-flash-lite",
+  "gemini-3.5-flash-lite",
+  "gemini-3.1-flash-lite",
+  "gemini-3.6-flash",
+  "gemini-3.8-flash"
+];
+
 export default {
   async fetch(request, env, ctx) {
     const rawBotToken = env && env.BOT_TOKEN ? env.BOT_TOKEN : DEFAULT_BOT_TOKEN;
