@@ -12,6 +12,7 @@ const MEM_STATS = {
 };
 const PROCESSED_UPDATES = new Set();
 let ADMIN_BROADCAST_MODE = false;
+let WORKING_MODEL = null;
 
 export default {
   async fetch(request, env, ctx) {
@@ -39,13 +40,56 @@ export default {
       const tgData = await tgRes.json();
 
       let geminiStatus = "⚠️ Testing...";
+      let workingModel = null;
+      let detectedCount = 0;
+      let allModelsList = "";
+
       try {
-        const testRes = await generateWebsiteCodeWithGemini(geminiKey, "Simple cafe landing page");
-        geminiStatus = testRes && testRes.includes("<html")
-          ? `<span style='color:green;'>✅ Active & Fast (${testRes.length} bytes generated)</span>`
-          : "<span style='color:red;'>❌ Returned empty response</span>";
+        const modelsRes = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models?key=${geminiKey}`
+        );
+        const modelsData = await modelsRes.json();
+        if (modelsRes.ok && modelsData.models) {
+          const validModels = modelsData.models
+            .filter(m => m.supportedGenerationMethods && m.supportedGenerationMethods.includes("generateContent"))
+            .map(m => m.name.replace(/^models\//, ""))
+            .filter(m => !m.includes("tts") && !m.includes("embedding") && !m.includes("imagen"));
+
+          detectedCount = validModels.length;
+          allModelsList = validModels.join(", ");
+
+          // Test models one by one with a lightweight 2-byte prompt
+          for (const m of validModels) {
+            try {
+              const testRes = await fetch(
+                `https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${geminiKey}`,
+                {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    contents: [{ parts: [{ text: "hi" }] }]
+                  })
+                }
+              );
+              if (testRes.ok) {
+                workingModel = m;
+                WORKING_MODEL = m;
+                if (db) await db.put("working_model", m);
+                break;
+              }
+            } catch (_) {}
+          }
+
+          if (workingModel) {
+            geminiStatus = `<span style='color:green;font-weight:bold;'>✅ Active & Verified: <code>${workingModel}</code></span>`;
+          } else {
+            geminiStatus = `<span style='color:red;'>❌ Detected ${detectedCount} models, but none answered generateContent</span>`;
+          }
+        } else {
+          geminiStatus = `<span style='color:red;'>❌ Google Error: ${modelsData.error?.message || "Invalid response"}</span>`;
+        }
       } catch (err) {
-        geminiStatus = `<span style='color:red;'>❌ Error: ${err.message}</span>`;
+        geminiStatus = `<span style='color:red;'>❌ Connection Error: ${err.message}</span>`;
       }
 
       const keyMask = geminiKey.length > 8 ? `${geminiKey.slice(0, 6)}...${geminiKey.slice(-4)} (${geminiKey.length} chars)` : "Not Set";
@@ -55,6 +99,9 @@ export default {
       html += `<p><b>Admin ID Locked To:</b> ${ADMIN_ID}</p>`;
       html += `<p><b>Gemini Key Detected:</b> <code>${keyMask}</code></p>`;
       html += `<p><b>Google Gemini AI Status:</b> ${geminiStatus}</p>`;
+      if (allModelsList) {
+        html += `<p style='font-size:12px;color:#666;'><b>Detected Models (${detectedCount}):</b> ${allModelsList}</p>`;
+      }
       html += `<p><b>Permanent Database (BOT_DB):</b> ${db ? "<span style='color:green;'>✅ Active & Permanent (No 404s)</span>" : "<span style='color:red;font-weight:bold;'>❌ MISSING! Go to Settings &rarr; Bindings &rarr; Add KV namespace 'BOT_DB'</span>"}</p>`;
       html += `<p><b>Hosting Domain:</b> ${url.origin}/site/[slug]</p>`;
       html += `<p><b>Tap-to-Edit Visual Editor:</b> Active via ${url.origin}/site/[slug]?edit=true</p>`;
@@ -440,7 +487,7 @@ async function generateAndDeployWebsite(botToken, geminiKey, db, chatId, userId,
   const msgId = statusMsg.result?.message_id;
 
   try {
-    const rawHtml = await generateWebsiteCodeWithGemini(geminiKey, userPrompt);
+    const rawHtml = await generateWebsiteCodeWithGemini(geminiKey, userPrompt, db);
 
     if (!rawHtml || rawHtml.length < 200) {
       throw new Error("AI returned empty or invalid HTML. Please try again!");
@@ -555,7 +602,7 @@ async function modifyWebsiteWithAI(botToken, geminiKey, db, chatId, userId, slug
   const msgId = statusMsg.result?.message_id;
 
   try {
-    const updatedHtml = await refineWebsiteWithGemini(geminiKey, existingHtml, editPrompt);
+    const updatedHtml = await refineWebsiteWithGemini(geminiKey, existingHtml, editPrompt, db);
 
     if (!updatedHtml || updatedHtml.length < 200) {
       throw new Error("Could not apply edits.");
@@ -607,8 +654,8 @@ async function modifyWebsiteWithAI(botToken, geminiKey, db, chatId, userId, slug
   }
 }
 
-// Master AI Prompt for Production-Grade HTML5/Tailwind Websites (Fast, reliable, direct calls with 14s timeout)
-async function generateWebsiteCodeWithGemini(geminiKey, userPrompt) {
+// Master AI Prompt for Production-Grade HTML5/Tailwind Websites
+async function generateWebsiteCodeWithGemini(geminiKey, userPrompt, db) {
   const systemPrompt = `You are an elite principal web designer and frontend architect.
 The user wants a website described as: "${userPrompt}".
 
@@ -629,59 +676,51 @@ Requirements:
    - Polished Footer
 5. Make it completely self-contained. Return ONLY valid raw HTML code without markdown code fences, no backticks, no conversational commentary.`;
 
-  const candidateModels = ["gemini-2.0-flash", "gemini-2.0-flash-exp", "gemini-1.5-flash-8b"];
-  let lastError = null;
+  const model = await getWorkingModel(geminiKey, db);
 
-  for (const model of candidateModels) {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 14000);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 16000);
 
-    try {
-      const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          signal: controller.signal,
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: systemPrompt }] }],
-            generationConfig: {
-              temperature: 0.3,
-              maxOutputTokens: 8192
-            }
-          })
-        }
-      );
-
-      clearTimeout(timeoutId);
-
-      if (!res.ok) {
-        const errJson = await res.json().catch(() => ({}));
-        if (res.status === 429) {
-          lastError = "Google Gemini rate limit reached (15 req/min). Please wait 30 seconds.";
-        } else {
-          lastError = errJson.error?.message || `HTTP ${res.status} (${model})`;
-        }
-        continue;
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: systemPrompt }] }],
+          generationConfig: {
+            temperature: 0.3,
+            maxOutputTokens: 8192
+          }
+        })
       }
+    );
 
-      const data = await res.json();
-      let text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-      text = text.replace(/^```html\s*/i, "").replace(/```\s*$/i, "").trim();
-      if (text.includes("<html") || text.includes("<!DOCTYPE")) {
-        return text;
-      }
-    } catch (e) {
-      clearTimeout(timeoutId);
-      lastError = e.name === "AbortError" ? "AI generation timed out after 14s" : e.message;
+    clearTimeout(timeoutId);
+
+    if (!res.ok) {
+      const errJson = await res.json().catch(() => ({}));
+      throw new Error(errJson.error?.message || `HTTP ${res.status} (${model})`);
     }
+
+    const data = await res.json();
+    let text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+    text = text.replace(/^```html\s*/i, "").replace(/```\s*$/i, "").trim();
+    if (text.includes("<html") || text.includes("<!DOCTYPE")) {
+      return text;
+    }
+  } catch (e) {
+    clearTimeout(timeoutId);
+    throw new Error(e.name === "AbortError" ? "AI generation timed out after 16s" : e.message);
   }
 
-  throw new Error(lastError || "Could not generate valid HTML");
+  throw new Error("Could not generate valid HTML");
 }
 
 // AI Modification Prompt
-async function refineWebsiteWithGemini(geminiKey, existingHtml, editInstructions) {
+async function refineWebsiteWithGemini(geminiKey, existingHtml, editInstructions, db) {
   const prompt = `You are an elite web developer.
 Modify the following existing website HTML based on this user instruction: "${editInstructions}".
 
@@ -694,55 +733,91 @@ Strict Editing Instructions:
 Existing HTML Code:
 ${existingHtml}`;
 
-  const candidateModels = ["gemini-2.0-flash", "gemini-2.0-flash-exp", "gemini-1.5-flash-8b"];
-  let lastError = null;
+  const model = await getWorkingModel(geminiKey, db);
 
-  for (const model of candidateModels) {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 14000);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 16000);
 
-    try {
-      const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          signal: controller.signal,
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: prompt }] }],
-            generationConfig: {
-              temperature: 0.2,
-              maxOutputTokens: 8192
-            }
-          })
-        }
-      );
-
-      clearTimeout(timeoutId);
-
-      if (!res.ok) {
-        const errJson = await res.json().catch(() => ({}));
-        if (res.status === 429) {
-          lastError = "Google Gemini rate limit reached (15 req/min). Please wait 30 seconds.";
-        } else {
-          lastError = errJson.error?.message || `HTTP ${res.status} (${model})`;
-        }
-        continue;
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: {
+            temperature: 0.2,
+            maxOutputTokens: 8192
+          }
+        })
       }
+    );
 
-      const data = await res.json();
-      let text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-      text = text.replace(/^```html\s*/i, "").replace(/```\s*$/i, "").trim();
-      if (text.includes("<html") || text.includes("<!DOCTYPE")) {
-        return text;
-      }
-    } catch (e) {
-      clearTimeout(timeoutId);
-      lastError = e.name === "AbortError" ? "AI modification timed out after 14s" : e.message;
+    clearTimeout(timeoutId);
+
+    if (!res.ok) {
+      const errJson = await res.json().catch(() => ({}));
+      throw new Error(errJson.error?.message || `HTTP ${res.status} (${model})`);
     }
+
+    const data = await res.json();
+    let text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+    text = text.replace(/^```html\s*/i, "").replace(/```\s*$/i, "").trim();
+    if (text.includes("<html") || text.includes("<!DOCTYPE")) {
+      return text;
+    }
+  } catch (e) {
+    clearTimeout(timeoutId);
+    throw new Error(e.name === "AbortError" ? "AI modification timed out after 16s" : e.message);
   }
 
-  throw new Error(lastError || "Could not modify website");
+  throw new Error("Could not modify website");
+}
+
+// Fast retrieval of verified working model from RAM or KV
+async function getWorkingModel(geminiKey, db) {
+  if (WORKING_MODEL) return WORKING_MODEL;
+
+  if (db) {
+    try {
+      const stored = await db.get("working_model");
+      if (stored) {
+        WORKING_MODEL = stored;
+        return stored;
+      }
+    } catch (_) {}
+  }
+
+  // Quick live discovery if not cached yet
+  try {
+    const modelsRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${geminiKey}`);
+    const data = await modelsRes.json();
+    if (data.models) {
+      const valid = data.models
+        .filter(m => m.supportedGenerationMethods && m.supportedGenerationMethods.includes("generateContent"))
+        .map(m => m.name.replace(/^models\//, ""))
+        .filter(m => !m.includes("tts") && !m.includes("embedding") && !m.includes("imagen"));
+
+      for (const m of valid) {
+        try {
+          const test = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${geminiKey}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ contents: [{ parts: [{ text: "hi" }] }] })
+          });
+          if (test.ok) {
+            WORKING_MODEL = m;
+            if (db) await db.put("working_model", m);
+            return m;
+          }
+        } catch (_) {}
+      }
+    }
+  } catch (_) {}
+
+  return "gemini-2.0-flash";
 }
 
 // Injects Universal Mobile Drawer Menu & Accordion Helper
