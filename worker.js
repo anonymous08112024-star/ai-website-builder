@@ -16,12 +16,10 @@ let WORKING_MODEL = null;
 
 // Fast Production Models in Priority Order (Flash & Flash-Lite First)
 const FAST_CANDIDATE_MODELS = [
-  "gemini-2.5-flash",
-  "gemini-2.5-flash-lite",
   "gemini-3.5-flash-lite",
-  "gemini-3.1-flash-lite",
+  "gemini-3.8-flash",
   "gemini-3.6-flash",
-  "gemini-3.8-flash"
+  "gemini-3.1-flash-lite"
 ];
 
 export default {
@@ -68,7 +66,16 @@ export default {
           detectedCount = validModels.length;
           allModelsList = validModels.join(", ");
 
-          for (const m of validModels) {
+          // Prioritize FAST_CANDIDATE_MODELS (gemini-3.5-flash-lite first)
+          const testQueue = [];
+          for (const fm of FAST_CANDIDATE_MODELS) {
+            if (validModels.includes(fm)) testQueue.push(fm);
+          }
+          for (const vm of validModels) {
+            if (!testQueue.includes(vm)) testQueue.push(vm);
+          }
+
+          for (const m of testQueue) {
             try {
               const testRes = await fetch(
                 `https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${geminiKey}`,
@@ -810,6 +817,46 @@ function synthesizeSmartWebsite(prompt) {
       { name: "Royal Wedding Package", price: "₹49,999", popular: true, features: ["Full Wedding & Reception", "Traditional + Candid Team", "Full Album + 4K Video"] },
       { name: "Grand Destination Film", price: "₹89,999", features: ["3 Days Multi-Event", "Drone Cinematography", "Hardcover Luxury Album", "Same-day Reel"] }
     ];
+  } else if (p.includes("salon") || p.includes("beauty") || p.includes("spa") || p.includes("hair") || p.includes("makeup") || p.includes("skin")) {
+    cat = "beauty";
+    accent = "rose";
+    brand = "Glow & Glam Beauty Lounge";
+    tagline = "Luxury Hair Styling, Skin Therapies & Bridal Care";
+    desc = "Premium salon sanctuary specializing in bridal transformations, keratin therapies, and skin rejuvenation.";
+    items = [
+      { title: "Bridal Couture Makeup", desc: "Flawless HD airbrush makeup tailored for your special ceremonies.", icon: "fa-wand-magic-sparkles" },
+      { title: "Advanced Hair Spa", desc: "Revitalizing keratin and organic deep-conditioning therapies for silky hair.", icon: "fa-scissors" },
+      { title: "Rejuvenating Facials", desc: "Clinical skincare treatments and revitalizing aromatherapy sessions.", icon: "fa-spa" }
+    ];
+    plans = [
+      { name: "Essential Glow", price: "₹1,499", features: ["Haircut & Wash", "Fruit Facial", "Express Manicure"] },
+      { name: "Bridal Radiance", price: "₹6,999", popular: true, features: ["HD Makeup", "Hair Styling", "Full Body Polishing", "Pre-bridal Care"] },
+      { name: "Royal Spa Day", price: "₹12,499", features: ["Full Luxury Package", "Keratin Treatment", "Deep Tissue Spa", "VIP Lounge"] }
+    ];
+  } else if (p.includes("doctor") || p.includes("clinic") || p.includes("health") || p.includes("dental") || p.includes("hospital") || p.includes("care")) {
+    cat = "medical";
+    accent = "emerald";
+    brand = "Apex Care Medical Clinic";
+    tagline = "Compassionate Healthcare with Modern Diagnostics";
+    desc = "Trusted specialists, modern consultation facilities, and fast appointments for you and your family.";
+    items = [
+      { title: "Expert Consultation", desc: "Senior medical specialists across multiple healthcare disciplines.", icon: "fa-user-doctor" },
+      { title: "Digital Diagnostics", desc: "Instant digital lab tests, scans, and verified reporting on your phone.", icon: "fa-stethoscope" },
+      { title: "Preventive Care", desc: "Tailored health checks and lifestyle management programs for all ages.", icon: "fa-shield-heart" }
+    ];
+    plans = [
+      { name: "General Checkup", price: "₹499", features: ["Doctor Consultation", "Vitals Check", "Prescription Review"] },
+      { name: "Comprehensive Health", price: "₹1,999", popular: true, features: ["Full Blood Panel", "ECG", "Specialist Follow-up", "Digital Records"] },
+      { name: "Family Annual Care", price: "₹5,999", features: ["Unlimited Consultations", "Home Sample Pickup", "Emergency Hotline", "15% Pharmacy Discount"] }
+    ];
+  } else {
+    const rawWords = prompt.replace(/[^a-zA-Z\s]/g, "").split(/\s+/).filter(w => w.length > 3 && !["website", "create", "modern", "design", "with", "make", "build", "dark", "mode"].includes(w.toLowerCase()));
+    if (rawWords.length > 0) {
+      const topWord = rawWords[0].charAt(0).toUpperCase() + rawWords[0].slice(1);
+      brand = topWord + " Hub";
+      tagline = "Premium Solutions & Services for " + topWord;
+      desc = "Delivering exceptional quality, verified client satisfaction, and tailored experiences for " + topWord + ".";
+    }
   }
 
   // Detect custom name or city from prompt
@@ -1072,12 +1119,17 @@ function applySmartModifications(html, instructions) {
   return modified;
 }
 
-// Universal Fast Gemini Engine with Per-Model 7s Timeout & Guaranteed Zero Failures
+// Universal Fast Gemini 3.5 Engine with Live AI Generation
 async function callGeminiApiFast(geminiKey, prompt, db) {
   let activeModel = WORKING_MODEL;
   if (!activeModel && db) {
     try {
       activeModel = await db.get("working_model");
+      // If KV had old/deprecated 2.5, 2.0, or 1.5 models, discard it!
+      if (activeModel && (activeModel.includes("2.5") || activeModel.includes("1.5") || activeModel.includes("2.0") || activeModel.includes("pro"))) {
+        activeModel = null;
+        await db.delete("working_model").catch(() => {});
+      }
       if (activeModel) WORKING_MODEL = activeModel;
     } catch (_) {}
   }
@@ -1090,22 +1142,19 @@ async function callGeminiApiFast(geminiKey, prompt, db) {
     if (!queue.includes(m)) queue.push(m);
   }
 
-  // Try top 2 candidate models with strict 7-second individual timeouts
-  for (const model of queue.slice(0, 2)) {
+  // Loop through all candidate models with 10s timeout
+  for (const model of queue) {
     const modelController = new AbortController();
     const modelTimeoutId = setTimeout(() => modelController.abort(), 7000);
 
     try {
       let genConfig = {
-        temperature: 0.3,
-        maxOutputTokens: 1800
+        temperature: 0.4,
+        maxOutputTokens: 2500
       };
 
-      if (model.includes("2.5")) {
-        genConfig.thinkingConfig = { thinkingBudget: 0 };
-      } else if (model.includes("flash-lite") || model.includes("3.1") || model.includes("3.5")) {
-        genConfig.thinkingConfig = { thinkingLevel: "minimal" };
-      } else {
+      // gemini-3.5-flash-lite has default minimal thinking for ultra-fast generation
+      if (model.includes("3.8") || model.includes("3.6")) {
         genConfig.thinkingConfig = { thinkingLevel: "low" };
       }
 
