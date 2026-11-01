@@ -12,7 +12,7 @@ const MEM_STATS = {
 };
 const PROCESSED_UPDATES = new Set();
 let ADMIN_BROADCAST_MODE = false;
-let CACHED_MODELS = null;
+let WORKING_MODEL = null;
 
 export default {
   async fetch(request, env, ctx) {
@@ -39,26 +39,15 @@ export default {
       );
       const tgData = await tgRes.json();
 
-      let geminiStatus = "⚠️ Not Tested";
-      let modelListHtml = "";
+      let geminiStatus = "⚠️ Testing...";
+      let activeModel = null;
       try {
-        const modelsRes = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models?key=${geminiKey}`
-        );
-        const modelsData = await modelsRes.json();
-        if (modelsRes.ok && modelsData.models) {
-          const genModels = modelsData.models
-            .filter(m => m.supportedGenerationMethods && m.supportedGenerationMethods.includes("generateContent"))
-            .map(m => m.name.replace(/^models\//, ""));
-
-          CACHED_MODELS = genModels;
-          geminiStatus = `<span style='color:green;'>✅ Active (${genModels.length} models detected)</span>`;
-          modelListHtml = `<p><b>Available Models:</b> <code>${genModels.slice(0, 5).join(", ")}</code></p>`;
-        } else {
-          geminiStatus = `<span style='color:red;'>❌ Google Error: ${modelsData.error?.message || "Invalid response"}</span>`;
-        }
+        activeModel = await findWorkingModel(geminiKey);
+        geminiStatus = activeModel
+          ? `<span style='color:green;'>✅ Verified Working Model: <b>${activeModel}</b></span>`
+          : "<span style='color:red;'>❌ Could not verify working model</span>";
       } catch (err) {
-        geminiStatus = `<span style='color:red;'>❌ Connection Error: ${err.message}</span>`;
+        geminiStatus = `<span style='color:red;'>❌ Error: ${err.message}</span>`;
       }
 
       const keyMask = geminiKey.length > 8 ? `${geminiKey.slice(0, 6)}...${geminiKey.slice(-4)} (${geminiKey.length} chars)` : "Not Set";
@@ -68,7 +57,6 @@ export default {
       html += `<p><b>Admin ID Locked To:</b> ${ADMIN_ID}</p>`;
       html += `<p><b>Gemini Key Detected:</b> <code>${keyMask}</code></p>`;
       html += `<p><b>Google Gemini AI Status:</b> ${geminiStatus}</p>`;
-      html += modelListHtml;
       html += `<p><b>Permanent Database (BOT_DB):</b> ${db ? "<span style='color:green;'>✅ Active & Permanent (No 404s)</span>" : "<span style='color:red;font-weight:bold;'>❌ MISSING! Go to Settings &rarr; Bindings &rarr; Add KV namespace 'BOT_DB'</span>"}</p>`;
       html += `<p><b>Hosting Domain:</b> ${url.origin}/site/[slug]</p>`;
       html += `<p><b>Tap-to-Edit Visual Editor:</b> Active via ${url.origin}/site/[slug]?edit=true</p>`;
@@ -432,10 +420,10 @@ async function sendWelcomeMenu(botToken, chatId, userId) {
 
 // Main AI Generation & Deployment Pipeline
 async function generateAndDeployWebsite(botToken, geminiKey, db, chatId, userId, userPrompt, originUrl) {
-  // 1. Show Telegram native "typing..." status in header
+  // Show Telegram native "typing..." status in header
   await tgApi(botToken, "sendChatAction", { chat_id: chatId, action: "typing" });
 
-  // 2. Send clean status message
+  // Send clean single status notice
   const statusMsg = await tgApi(botToken, "sendMessage", {
     chat_id: chatId,
     text: `⚡ <b>Designing your website...</b>\n\n<i>Crafting responsive layout, Tailwind components, and WhatsApp booking (~6s)...</i>`,
@@ -445,7 +433,6 @@ async function generateAndDeployWebsite(botToken, geminiKey, db, chatId, userId,
   const msgId = statusMsg.result?.message_id;
 
   try {
-    // 3. Generate HTML with Gemini Flash
     const rawHtml = await generateWebsiteCodeWithGemini(geminiKey, userPrompt);
 
     if (!rawHtml || rawHtml.length < 200) {
@@ -455,7 +442,7 @@ async function generateAndDeployWebsite(botToken, geminiKey, db, chatId, userId,
     const cleanSlug = generateSlugFromPrompt(userPrompt);
     const finalHtml = injectBrandingFooter(rawHtml);
 
-    // 4. Save permanently in KV database & RAM cache
+    // Save in KV database & RAM cache
     SITE_CACHE.set(cleanSlug, finalHtml);
     if (db) {
       try {
@@ -496,7 +483,7 @@ async function generateAndDeployWebsite(botToken, geminiKey, db, chatId, userId,
     caption += `• <b>AI Revisions:</b> Reply to this message with <code>/edit &lt;changes&gt;</code> anytime.\n\n`;
     caption += `<i>Tap "Open Live Website" to view or "Tap-to-Edit on Phone" to customize text!</i>`;
 
-    // 5. Cleanly remove the waiting message
+    // Cleanly remove waiting message
     if (msgId) {
       await tgApi(botToken, "deleteMessage", {
         chat_id: chatId,
@@ -504,7 +491,7 @@ async function generateAndDeployWebsite(botToken, geminiKey, db, chatId, userId,
       });
     }
 
-    // 6. Deliver the finished website card with buttons
+    // Deliver finished website card
     await tgApi(botToken, "sendMessage", {
       chat_id: chatId,
       text: caption,
@@ -512,7 +499,7 @@ async function generateAndDeployWebsite(botToken, geminiKey, db, chatId, userId,
       reply_markup: actionButtons
     });
 
-    // 7. Send standalone index.html source code file
+    // Send standalone index.html source code file
     try {
       const form = new FormData();
       form.append("chat_id", String(chatId));
@@ -614,7 +601,7 @@ async function modifyWebsiteWithAI(botToken, geminiKey, db, chatId, userId, slug
   }
 }
 
-// Master AI Prompt for Production-Grade HTML5/Tailwind Websites (Fast & Clean)
+// Master AI Prompt for Production-Grade HTML5/Tailwind Websites
 async function generateWebsiteCodeWithGemini(geminiKey, userPrompt) {
   const systemPrompt = `You are an elite principal web designer and frontend architect.
 The user wants a website described as: "${userPrompt}".
@@ -637,44 +624,36 @@ Requirements:
 5. Include functional Vanilla JavaScript for mobile menu toggles and FAQ accordion expand/collapse.
 6. Make it completely self-contained. Return ONLY valid raw HTML code without markdown code fences, no backticks, no conversational commentary.`;
 
-  const candidateModels = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-pro"];
-  let lastError = null;
+  const model = await findWorkingModel(geminiKey);
 
-  for (const model of candidateModels) {
-    try {
-      const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: systemPrompt }] }],
-            generationConfig: {
-              temperature: 0.3,
-              maxOutputTokens: 8192
-            }
-          })
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: systemPrompt }] }],
+        generationConfig: {
+          temperature: 0.3,
+          maxOutputTokens: 8192
         }
-      );
-
-      if (!res.ok) {
-        const errJson = await res.json().catch(() => ({}));
-        lastError = errJson.error?.message || `HTTP ${res.status} (${model})`;
-        continue;
-      }
-
-      const data = await res.json();
-      let text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-      text = text.replace(/^```html\s*/i, "").replace(/```\s*$/i, "").trim();
-      if (text.includes("<html") || text.includes("<!DOCTYPE")) {
-        return text;
-      }
-    } catch (e) {
-      lastError = e.message;
+      })
     }
+  );
+
+  if (!res.ok) {
+    const errJson = await res.json().catch(() => ({}));
+    throw new Error(errJson.error?.message || `HTTP ${res.status} (${model})`);
   }
 
-  throw new Error(lastError || "Could not generate valid HTML");
+  const data = await res.json();
+  let text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+  text = text.replace(/^```html\s*/i, "").replace(/```\s*$/i, "").trim();
+  if (text.includes("<html") || text.includes("<!DOCTYPE")) {
+    return text;
+  }
+
+  throw new Error("Model returned incomplete HTML. Please try again.");
 }
 
 // AI Modification Prompt
@@ -690,44 +669,87 @@ Strict Guidelines:
 Existing HTML Code:
 ${existingHtml}`;
 
-  const candidateModels = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-pro"];
-  let lastError = null;
+  const model = await findWorkingModel(geminiKey);
 
-  for (const model of candidateModels) {
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: {
+          temperature: 0.2,
+          maxOutputTokens: 8192
+        }
+      })
+    }
+  );
+
+  if (!res.ok) {
+    const errJson = await res.json().catch(() => ({}));
+    throw new Error(errJson.error?.message || `HTTP ${res.status} (${model})`);
+  }
+
+  const data = await res.json();
+  let text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+  text = text.replace(/^```html\s*/i, "").replace(/```\s*$/i, "").trim();
+  if (text.includes("<html") || text.includes("<!DOCTYPE")) {
+    return text;
+  }
+
+  throw new Error("Could not modify website");
+}
+
+// Model Auto-Discovery: Probes candidate models live with a 2-byte ping and locks to the working model
+async function findWorkingModel(geminiKey) {
+  if (WORKING_MODEL) return WORKING_MODEL;
+
+  let modelList = [];
+  try {
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${geminiKey}`);
+    const data = await res.json();
+    if (res.ok && data.models) {
+      modelList = data.models
+        .filter(m => m.supportedGenerationMethods && m.supportedGenerationMethods.includes("generateContent"))
+        .map(m => m.name.replace(/^models\//, ""))
+        .filter(m => !m.includes("2.5") && !m.includes("tts") && m !== "gemini-pro"); // Exclude known preview 404s
+    }
+  } catch (_) {}
+
+  // Prioritize active 2.0-flash models over experimental or preview models
+  const candidates = [
+    ...modelList.filter(m => m.includes("flash")),
+    ...modelList,
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-exp",
+    "gemini-1.5-flash-8b",
+    "gemini-1.5-pro"
+  ];
+
+  const uniqueCandidates = Array.from(new Set(candidates));
+
+  for (const model of uniqueCandidates) {
     try {
-      const res = await fetch(
+      const testRes = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            contents: [{ parts: [{ text: prompt }] }],
-            generationConfig: {
-              temperature: 0.2,
-              maxOutputTokens: 8192
-            }
+            contents: [{ parts: [{ text: "hi" }] }]
           })
         }
       );
-
-      if (!res.ok) {
-        const errJson = await res.json().catch(() => ({}));
-        lastError = errJson.error?.message || `HTTP ${res.status} (${model})`;
-        continue;
+      if (testRes.ok) {
+        WORKING_MODEL = model;
+        return model;
       }
-
-      const data = await res.json();
-      let text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-      text = text.replace(/^```html\s*/i, "").replace(/```\s*$/i, "").trim();
-      if (text.includes("<html") || text.includes("<!DOCTYPE")) {
-        return text;
-      }
-    } catch (e) {
-      lastError = e.message;
-    }
+    } catch (_) {}
   }
 
-  throw new Error(lastError || "Could not modify website");
+  WORKING_MODEL = "gemini-2.0-flash";
+  return WORKING_MODEL;
 }
 
 // Injects Mobile-Friendly Visual Tap-to-Edit Mode & Floating Action Bar
